@@ -9,7 +9,7 @@
 #include <vector>
 
 // ============================================================
-// M6.1 edge-case tests for topo-jit-api + topo-jit-engine.
+// Edge-case tests for topo-jit-api + topo-jit-engine.
 //
 // Real API surface (`topo-lang-cpp/runtime/include/topo/jit.h`):
 //   - topo::jit::Context              — constraint collector (pure C++)

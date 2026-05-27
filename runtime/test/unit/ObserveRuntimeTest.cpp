@@ -132,7 +132,7 @@ TEST_F(ObserveRuntimeTest, ThreadSafety) {
 }
 
 // ============================================================
-// M6.1 edge-case + stress tests
+// Edge-case + stress tests
 //
 // These exercise failure modes and stress paths of libtopo-observe:
 //   - Race conditions in the (thread-local) span stack under heavy

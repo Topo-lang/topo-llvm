@@ -228,7 +228,7 @@ TEST_F(ParallelRuntimeTest, SpawnRetPriBackgroundPriority) {
 }
 
 // ============================================================
-// M6.1 — edge-case / stress coverage
+// Edge-case / stress coverage
 // ============================================================
 //
 // Each test is independent and deterministic. No sleeps longer than ~10 ms.

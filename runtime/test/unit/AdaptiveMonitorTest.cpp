@@ -108,7 +108,7 @@ TEST_F(AdaptiveMonitorTest, MaxVersionsRespected) {
 }
 
 // ============================================================
-// M6.1 edge-case coverage
+// Edge-case coverage
 // ============================================================
 
 // API gap note: the public adaptive runtime surface is register/init/

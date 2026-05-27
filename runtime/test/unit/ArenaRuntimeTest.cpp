@@ -82,7 +82,7 @@ TEST(ArenaRuntimeTest, ZeroSizeReturnsNull) {
 }
 
 // ---------------------------------------------------------------------------
-// M6.1 edge-case tests (stress + alignment + reset + nesting + thread-safety
+// Edge-case tests (stress + alignment + reset + nesting + thread-safety
 // contract). All tests must pass cleanly under ASan and TSan.
 // ---------------------------------------------------------------------------
 
