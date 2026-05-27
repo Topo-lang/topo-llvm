@@ -1,0 +1,26 @@
+// 05_pipeline — Pipeline data flow orchestration
+// Demonstrates: pipeline fn block, DAG fork/join, TOPO_PIPELINE macro
+
+using int = std::cpp17::int;
+
+namespace imaging {
+
+  public:
+    int process(int input);
+
+    fn process {
+      load -> decode;
+      decode -> enhance;
+      decode -> detect;
+      enhance -> compose;
+      detect -> compose;
+      compose -> std::cpp17::int;
+    }
+
+  protected:
+    load(int input) -> int;
+    decode(int data) -> int;
+    enhance(int pixels) -> int;
+    detect(int pixels) -> int;
+    compose(int enhanced, int detected) -> int;
+}

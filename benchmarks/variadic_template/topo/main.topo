@@ -1,0 +1,26 @@
+// variadic_template — Variadic template instantiation
+// Demonstrates: variadic template declaration with explicit instantiation
+
+using int = std::cpp17::int;
+using float = std::cpp17::float;
+using double = std::cpp17::double;
+using Size = std::cpp17::size_t;
+
+namespace pack {
+
+  public:
+    template<typename... Ts>
+    type Tuple {
+        public:
+            Size count() const;
+    }
+
+    template<typename... Ts>
+    int sum_all(Ts... args);
+
+    instantiate Tuple<int, float, double>;
+    instantiate sum_all<int, int, int>;
+
+  protected:
+    int accumulate(int a, int b);
+}

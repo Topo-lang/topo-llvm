@@ -1,0 +1,23 @@
+[project]
+name = "class_template"
+
+[topo]
+root = "topo/main.topo"
+
+[build]
+sources = ["src/*.cpp"]
+include = ["include", "../../../topo-lang-cpp/runtime/include", "../../runtime/include"]
+standard = "c++17"
+output = "class_template_forced"
+
+[builder]
+mode = "aggressive"
+
+# Force ContainmentInterceptionPass to run on this variant so the
+# forced-mode build differs observably from base. Main's Phase-N printf
+# statements call std::printf without a declared-external wrapper, so
+# the pass inserts __topo_containment_violation(caller, callee) before
+# each — the equivalence test scans class_template_forced.ll for that
+# runtime call symbol.
+[containment]
+mode = "force"

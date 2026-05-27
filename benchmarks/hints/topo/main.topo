@@ -1,0 +1,21 @@
+// 26_hints — Data-aware optimization hints
+// Demonstrates cardinality() and access() hints for optimization passes
+
+using int = std::cpp17::int;
+using float = std::cpp17::float;
+
+namespace sim {
+  public:
+    void run(int n) -> cardinality(1k..100k), access(streaming);
+
+    fn run {
+      update -> collect;
+      collect -> void;
+    }
+
+  protected:
+    void update(int n)
+        -> cardinality(1k..100k), access(streaming);
+    int collect(int n)
+        -> cardinality(1k..100k), access(streaming);
+}

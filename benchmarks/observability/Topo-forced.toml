@@ -1,0 +1,16 @@
+[project]
+name = "observability"
+
+[topo]
+root = "topo/main.topo"
+
+[build]
+sources = ["src/*.cpp"]
+include = ["include", "../../../topo-lang-cpp/runtime/include", "../../runtime/include"]
+standard = "c++17"
+output = "observability_forced"
+
+[observability]
+mode = "force"
+exporter = "stdout"
+sampling_rate = 1.0

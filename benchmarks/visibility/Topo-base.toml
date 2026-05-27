@@ -1,0 +1,14 @@
+[project]
+name = "hello_visibility"
+
+[topo]
+root = "topo/main.topo"
+
+[build]
+sources = ["src/*.cpp"]
+include = ["include"]
+standard = "c++17"
+output = "hello_visibility_base"
+
+[builder]
+mode = "dev"

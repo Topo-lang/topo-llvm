@@ -1,0 +1,15 @@
+// 23_indirection — IndirectionPass optimization
+// Demonstrates smart pointer promotion and vector→span lowering
+
+using int = std::cpp17::int;
+
+std::import("types.h", Buffer);
+
+namespace transform {
+  public:
+    int run_test();
+
+  protected:
+    int process_unique(owned Buffer buf);
+    int process_vector(int count);
+}

@@ -1,0 +1,20 @@
+// 28_observability — Tracing span instrumentation
+// ObservabilityPass inserts topo_trace_span_begin/end around stage functions
+
+using int = std::cpp17::int;
+
+namespace pipeline {
+  public:
+    int execute(int input);
+
+    fn execute {
+      parse -> validate;
+      validate -> transform;
+      transform -> int;
+    }
+
+  protected:
+    parse(int input) -> int;
+    validate(int data) -> int;
+    transform(int data) -> int;
+}

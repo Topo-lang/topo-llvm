@@ -1,0 +1,14 @@
+[project]
+name = "lifetime_unfriendly"
+
+[topo]
+root = "topo/main.topo"
+
+[build]
+sources = ["src/*.cpp"]
+include = ["../../../topo-lang-cpp/runtime/include", "../../runtime/include"]
+standard = "c++17"
+output = "lifetime_unfriendly_base"
+
+[lifetime]
+mode = "off"

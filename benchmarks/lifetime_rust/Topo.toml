@@ -1,0 +1,13 @@
+[project]
+name = "lifetime_rust"
+
+[topo]
+root = "topo/main.topo"
+
+[build]
+language = "rust"
+sources = ["src"]
+output = "lifetime_rust"
+
+[lifetime]
+mode = "force"

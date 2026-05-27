@@ -1,0 +1,23 @@
+// pipeline_rust — Pipeline data flow orchestration
+using i32 = std::rust::i32;
+
+namespace pipeline_rust {
+  public:
+    i32 process(i32 input);
+
+    fn process {
+      load -> decode;
+      decode -> enhance;
+      decode -> detect;
+      enhance -> compose;
+      detect -> compose;
+      compose -> i32;
+    }
+
+  protected:
+    load(i32 input) -> i32;
+    decode(i32 data) -> i32;
+    enhance(i32 pixels) -> i32;
+    detect(i32 pixels) -> i32;
+    compose(i32 enhanced, i32 detected) -> i32;
+}

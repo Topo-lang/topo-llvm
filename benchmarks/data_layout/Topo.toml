@@ -1,0 +1,17 @@
+[project]
+name = "data_layout_perf"
+
+[topo]
+root = "topo/main.topo"
+
+[build]
+sources = ["src/*.cpp"]
+include = ["include", "../../../topo-lang-cpp/runtime/include", "../../runtime/include"]
+standard = "c++17"
+output = "data_layout_perf"
+
+[builder]
+mode = "aggressive"
+
+[optimize.data-layout]
+mode = "auto"

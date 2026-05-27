@@ -1,0 +1,66 @@
+# Build artifacts from topo-build
+**/build/
+**/.topo-cache/
+
+# ------------------------------------------------------------------
+# Why explicit enumeration?
+#
+# Each benchmark dir <name>/ produces a vanilla binary at
+# <name>/<name> (same name as parent dir, no extension). On macOS
+# Mach-O executables carry no extension, so a generic gitignore
+# pattern can't distinguish "build-output binary" from a source file
+# or subdirectory by extension matching alone.
+#
+# We can't write `same-name-as-parent-dir` in glob syntax, so the
+# strategy is: enumerate by directory-name family. The variant
+# binaries (*_base, *_forced, *_baseline, *_baseline_*) ARE
+# enumerable by suffix and live above. The bare-name binary needs
+# either a per-dir entry or a family wildcard like `*/<prefix>*`.
+#
+# When adding a new benchmark dir, append its bare-name pattern
+# below — or, better, use a `*/<prefix>*` wildcard if it joins an
+# existing family.
+# ------------------------------------------------------------------
+
+# Variant binaries (enumerable by suffix)
+*_baseline
+*_baseline_*
+*_base
+*_forced
+
+# Bare-name binaries (per-dir / per-family)
+*/adaptive_parallel
+*/auxiliary_types
+# class_template family: class_template, class_template_comptime, _constraint, _crtp, _templates, _types, _variadic
+*/class_template*
+*/data_layout_perf
+*/data_layout_force_soa
+*/hello_visibility
+*/hints
+*/indirection
+*/ir_embedding
+*/lifetime_arena
+*/lifetime_forced
+*/loop_parallel
+*/multi_return
+*/multireturn
+*/observability
+*/ownership
+*/parallel_runtime
+*/pipeline
+*/stages
+*/cross_module_adapter
+*/operator_pipeline
+*/variadic_template
+*/visibility_adapter
+*/mixed_lang
+*/priority
+*/obfuscation
+
+# Diagnostic artifacts that `topo build` / `topo-prof` may emit alongside
+# bench binaries. Same script produces an `.exe` on Windows and an ELF on
+# Linux, so a wildcard catches them without per-bench enumeration.
+*/v_vanilla
+*/*.ll
+*/*.dSYM
+*/*.topo-passes

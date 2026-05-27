@@ -1,0 +1,20 @@
+// lifetime_rust — LifetimeArenaPass arena allocation
+using i32 = std::rust::i32;
+
+namespace lifetime_rust {
+  public:
+    i32 run_test();
+    i32 friendly_work(i32 seed);
+    i32 unfriendly_work(i32 seed);
+
+    fn run_test {
+      allocate -> process;
+      process -> i32;
+    }
+
+    lifetime batch = allocate..process;
+
+  protected:
+    allocate() -> i32;
+    process(i32 input) -> i32;
+}

@@ -1,0 +1,14 @@
+[project]
+name = "ownership_unfriendly"
+
+[topo]
+root = "topo/main.topo"
+
+[build]
+sources = ["src/*.cpp"]
+include = ["include"]
+standard = "c++17"
+output = "ownership_unfriendly_base"
+
+[optimize.indirection]
+mode = "off"

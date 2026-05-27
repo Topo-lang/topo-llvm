@@ -1,0 +1,16 @@
+// ownership_unfriendly — split binary for shared/weak path only.
+// Uses natural escape (opaque function pointer + cross-TU registry)
+// instead of volatile g_escape artifact.
+
+using int = std::cpp17::int;
+
+std::import("scene.h", Texture);
+
+namespace scene {
+  public:
+    run_test() -> int;
+
+  protected:
+    process_shared(shared Texture tex) -> int;
+    observe_weak(weak Texture tex) -> int;
+}

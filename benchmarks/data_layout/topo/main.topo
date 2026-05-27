@@ -1,0 +1,23 @@
+using int = std::cpp17::int;
+using float = std::cpp17::float;
+using ParticleArray = std::cpp17::ParticleArray;
+
+namespace physics {
+    public:
+        void simulate(ParticleArray particles, float dt)
+            -> cardinality(256k), access(streaming);
+
+        fn simulate {
+            apply_forces -> integrate;
+            integrate -> boundary_check;
+            boundary_check -> void;
+        }
+
+    protected:
+        void apply_forces(ParticleArray particles, float dt)
+            -> cardinality(256k), access(streaming);
+        void integrate(ParticleArray particles, float dt)
+            -> cardinality(256k), access(streaming);
+        void boundary_check(ParticleArray particles)
+            -> cardinality(256k), access(streaming);
+}

@@ -1,0 +1,16 @@
+// mixed_lang — C++/Rust mixed compilation benchmark
+// Demonstrates: cross-language function calls + inlining via LLVM IR merge
+
+using int = std::cpp17::int;
+
+namespace engine {
+
+  public:
+    void run();
+    int compute(const int x, const int y);
+    int bench_friendly(const int n);
+    int bench_unfriendly(const int n);
+
+  private:
+    void helper();
+}

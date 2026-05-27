@@ -1,0 +1,20 @@
+[project]
+name = "loop_reduction"
+
+[topo]
+root = "topo/main.topo"
+
+[build]
+sources = ["src/*.cpp"]
+include = ["include", "../../../topo-lang-cpp/runtime/include", "../../runtime/include"]
+standard = "c++17"
+output = "loop_reduction_forced"
+
+[parallel]
+mode = "force"
+min_tasks_to_parallelize = 2
+
+[loop_parallel]
+mode = "force"
+partition = true
+reduction = true

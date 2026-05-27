@@ -1,0 +1,26 @@
+// loop_reduction — LoopParallelizePass reduction-combine codegen
+//
+// reduce_sum and reduce_combo are same-stage siblings (stage<2>), so both
+// are parallel-stage functions. Their loop-carried accumulators are
+// associative reductions: under forced loop partitioning each partition
+// folds a local partial and the parent serially combines them. The result
+// must stay identical to the serial build.
+
+using int = std::cpp17::int;
+
+namespace redux {
+
+  public:
+    int run_test();
+
+    fn run_test {
+      stage<1> init_data();
+      stage<2> reduce_sum();
+      stage<2> reduce_combo();
+    }
+
+  protected:
+    int init_data();
+    int reduce_sum();
+    int reduce_combo();
+}

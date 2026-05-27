@@ -1,0 +1,2 @@
+// parallel_friendly — runtime-only test, no topo declarations needed.
+namespace parallel_friendly_demo {}

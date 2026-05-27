@@ -1,0 +1,19 @@
+// Minimal fixture for SymbolObfuscator equivalence tests (M5 Phase 1C).
+// Public entry + protected compute layer + private helpers gives the
+// obfuscator three internal symbols to rename while the externally
+// observable stdout (printed via main()) stays unchanged.
+
+using int = std::cpp17::int;
+
+namespace obf {
+
+  public:
+    int run_benchmark();
+
+  protected:
+    int compute_inner(int x);
+
+  private:
+    int helper_a(int x);
+    int helper_b(int x);
+}

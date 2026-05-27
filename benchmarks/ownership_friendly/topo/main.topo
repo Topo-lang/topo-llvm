@@ -1,0 +1,15 @@
+// ownership_friendly — split binary for owned/unique_ptr path only.
+// No escape artifact. Auto heuristic is expected to apply IndirectionPass
+// without cross-path confounding.
+
+using int = std::cpp17::int;
+
+std::import("scene.h", Node);
+
+namespace scene {
+  public:
+    run_test() -> int;
+
+  protected:
+    process_owned(owned Node node) -> int;
+}

@@ -1,0 +1,22 @@
+[project]
+name = "hints"
+
+[topo]
+root = "topo/main.topo"
+
+[build]
+sources = ["src/*.cpp"]
+include = ["include", "../../../topo-lang-cpp/runtime/include", "../../runtime/include"]
+standard = "c++17"
+output = "hints_forced"
+
+[parallel]
+mode = "force"
+min_tasks_to_parallelize = 2
+
+[optimize.data-layout]
+mode = "soa"
+
+[optimize.prefetch]
+mode = "force"
+distance = 64

@@ -1,0 +1,18 @@
+// observability_rust — Tracing span instrumentation
+using i32 = std::rust::i32;
+
+namespace observability_rust {
+  public:
+    i32 execute(i32 input);
+
+    fn execute {
+      parse -> validate;
+      validate -> transform;
+      transform -> i32;
+    }
+
+  protected:
+    parse(i32 input) -> i32;
+    validate(i32 data) -> i32;
+    transform(i32 data) -> i32;
+}

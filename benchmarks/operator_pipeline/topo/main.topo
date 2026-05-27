@@ -1,0 +1,28 @@
+// operator_pipeline — Pipeline with operator-overloaded types
+// Demonstrates: type with operator+, pipeline using the type
+
+using int = std::cpp17::int;
+
+namespace math {
+
+  public:
+    type Vec2 {
+        public:
+            int x();
+            int y();
+            fn operator+(Vec2 lhs, Vec2 rhs) -> Vec2;
+    }
+
+    int pipeline_sum(int a, int b);
+
+    fn pipeline_sum {
+      make_vec -> add_offset;
+      add_offset -> extract;
+      extract -> int;
+    }
+
+  protected:
+    Vec2 make_vec(int a, int b);
+    Vec2 add_offset(Vec2 v);
+    int extract(Vec2 v);
+}

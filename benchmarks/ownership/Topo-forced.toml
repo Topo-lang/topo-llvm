@@ -1,0 +1,14 @@
+[project]
+name = "ownership"
+
+[topo]
+root = "topo/main.topo"
+
+[build]
+sources = ["src/*.cpp"]
+include = ["include"]
+standard = "c++17"
+output = "ownership_forced"
+
+[optimize.indirection]
+mode = "force"

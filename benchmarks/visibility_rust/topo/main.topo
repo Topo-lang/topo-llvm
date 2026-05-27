@@ -1,0 +1,18 @@
+// visibility_rust — Visibility basics for Rust
+using i32 = std::rust::i32;
+
+namespace visibility_rust {
+  public:
+    i32 add(i32 a, i32 b);
+    i32 subtract(i32 a, i32 b);
+    i32 get_last_result();
+    i32 friendly_work(i32 seed);
+    i32 unfriendly_work();
+
+  protected:
+    log_operation(i32 result) -> void;
+
+  private:
+    reset_state() -> void;
+    set_value(i32 val) -> void;
+}

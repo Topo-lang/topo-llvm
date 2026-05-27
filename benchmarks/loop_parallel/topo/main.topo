@@ -1,0 +1,26 @@
+// 24_loop_parallel — LoopParallelizePass vectorization hints
+// Demonstrates loop auto-vectorization metadata injection
+//
+// scale and negate each own a private buffer (data_scale / data_negate in the
+// C++ implementation), so they are genuinely independent siblings. The stage
+// ordering below is kept for determinism in how results are printed, but both
+// functions are safe to run in parallel under forced mode.
+
+using int = std::cpp17::int;
+using float = std::cpp17::float;
+
+namespace vecmath {
+  public:
+    int run_test();
+
+    fn run_test {
+      stage<1> scale();
+      stage<2> negate();
+      stage<3> sum();
+    }
+
+  protected:
+    scale(float factor) -> int;
+    negate() -> int;
+    sum(int a, int b) -> int;
+}

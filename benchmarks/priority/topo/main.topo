@@ -1,0 +1,35 @@
+// E2E: priority declarations with propagation
+// Tests: explicit priority levels, propagation through call graph
+
+using int = std::cpp17::int;
+
+namespace compute {
+
+  public:
+    priority(critical):
+      void run_critical_path();
+
+    priority(high):
+      void process_data(const int size);
+
+    void run_pipeline();
+
+    priority(low):
+      void cleanup();
+
+    priority(background):
+      void log_metrics();
+
+  protected:
+    void critical_helper(const int n);
+
+  private:
+    void internal_step();
+
+  fn run_pipeline {
+    stage<1> run_critical_path();
+    stage<1> process_data();
+    stage<2> cleanup();
+    stage<3> log_metrics();
+  }
+}

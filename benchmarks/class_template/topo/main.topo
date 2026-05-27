@@ -1,0 +1,264 @@
+// 08_class_template — Type Declaration + Template Metaprogramming
+// Demonstrates: type declarations, function/type templates, CRTP,
+// constraints, specialization, comptime, typefn, template template params,
+// variadic templates, and adapt/instantiate directives.
+
+// --- Type aliases ---
+using Int    = std::cpp17::int32_t;
+using Bool   = std::cpp17::bool;
+using Float  = std::cpp17::float;
+using Double = std::cpp17::double;
+using Size   = std::cpp17::size_t;
+
+// ============================================================
+// Phase 1: Basic type declarations
+// ============================================================
+
+namespace container {
+
+  public:
+    // Simple type with inheritance
+    type Shape {
+        public:
+            Float area() const;
+            Float perimeter() const;
+        protected:
+            void validate();
+        private:
+            Float cached_area;
+    }
+
+    type Circle : public Shape {
+        public:
+            explicit Circle(Float radius);
+            ~Circle();
+            Float radius() const;
+        private:
+            Float radius_;
+    }
+
+    // Static members
+    type MathConstants {
+        public:
+            static Float pi();
+            static Float e();
+        private:
+            static Int precision;
+    }
+}
+
+// ============================================================
+// Phase 2: Function templates
+// ============================================================
+
+namespace algorithm {
+
+  public:
+    // Function template with single type param
+    template<typename T>
+    T max(T a, T b);
+
+    // Function template with multiple params
+    template<typename T, typename U>
+    T convert(U source);
+
+    // Non-type template parameter
+    template<typename T, int N>
+    void fill_array(T value);
+
+    // Template fn block
+    template<typename T>
+    T normalize(T x, T y);
+
+    fn normalize {
+        stage<1> max(x, y);
+    }
+}
+
+// ============================================================
+// Phase 3: Type templates + CRTP
+// ============================================================
+
+namespace collection {
+
+  public:
+    // Basic type template
+    template<typename T>
+    type Vector {
+        public:
+            void push_back(const T& value);
+            T front() const;
+            T back() const;
+            Size size() const;
+            Bool empty() const;
+        private:
+            T data;
+            Size count;
+    }
+
+    // Multi-param type template
+    template<typename K, typename V>
+    type HashMap {
+        public:
+            void insert(K key, V value);
+            V get(const K& key) const;
+            Bool contains(const K& key) const;
+            Size size() const;
+        private:
+            Size bucket_count;
+    }
+
+    // Non-type template parameter
+    template<typename T, int N>
+    type Array {
+        public:
+            T at(Int index) const;
+            void set(Int index, T value);
+            static Int capacity();
+        private:
+            T storage;
+    }
+
+    // CRTP pattern
+    template<typename Derived>
+    type Printable {
+        public:
+            void print() const;
+            void println() const;
+    }
+
+    type Point : public Printable<Point> {
+        public:
+            explicit Point(Float x, Float y);
+            Float x() const;
+            Float y() const;
+        private:
+            Float x_;
+            Float y_;
+    }
+
+    // Explicit instantiation
+    instantiate Vector<Int>;
+    instantiate Vector<Float>;
+    instantiate HashMap<Int, Double>;
+    instantiate Array<Float, 16>;
+}
+
+// ============================================================
+// Phase 4: Constraints + Specialization
+// ============================================================
+
+namespace traits {
+
+  public:
+    // Constraint declaration
+    constraint Numeric {
+        T add(T a, T b);
+        T multiply(T a, T b);
+        T zero;
+    }
+
+    // Constraint with inheritance
+    constraint Ordered : Numeric {
+        Bool less_than(T a, T b);
+    }
+
+    // Adapt constraint for a concrete type
+    adapt Numeric for Double {
+        add = double_add;
+        multiply = double_multiply;
+        zero = double_zero;
+    }
+
+    // Constrained template function
+    template<typename T : Numeric>
+    T sum(Vector<T> data);
+
+    template<typename T : Ordered>
+    T clamp(T value, T low, T high);
+
+    // Full specialization
+    template<>
+    type TypeTraits<Int> {
+        public:
+            static Bool is_integral();
+            static Bool is_floating();
+            static Int max_value();
+    }
+
+    // Partial specialization
+    template<typename T>
+    type TypeTraits<T*> {
+        public:
+            static Bool is_pointer();
+            static Size pointer_size();
+    }
+
+    // Primary template (must be declared for specializations to reference)
+    template<typename T>
+    type TypeTraits {
+        public:
+            static Bool is_integral();
+            static Bool is_floating();
+    }
+}
+
+// ============================================================
+// Phase 5: Comptime + TypeFn + Template Template Params
+// ============================================================
+
+namespace meta {
+
+  public:
+    // Compile-time conditional
+    comptime if (N <= 4) {
+        void small_path();
+    } else {
+        void large_path();
+    }
+
+    // Compile-time function
+    comptime fn factorial(Int N) -> Int { N }
+
+    // Type function with pattern matching
+    typefn Wider(typename T) -> typename {
+        match T {
+            Float  => Double,
+            Int    => Size,
+            _      => Double,
+        }
+    }
+
+    // Template template parameter
+    template<typename T, template<typename> class Container>
+    type Stack {
+        public:
+            void push(const T& value);
+            T pop();
+            T top() const;
+            Bool empty() const;
+        private:
+            Container<T> storage;
+    }
+}
+
+// ============================================================
+// Phase 6: Variadic templates
+// ============================================================
+
+namespace variadic {
+
+  public:
+    // Variadic template declaration
+    template<typename... Ts>
+    void print_all(Ts... args);
+
+    // Variadic type template
+    template<typename... Components>
+    type Tuple {
+        public:
+            Size component_count() const;
+    }
+
+    instantiate Tuple<Int, Float, Double>;
+}

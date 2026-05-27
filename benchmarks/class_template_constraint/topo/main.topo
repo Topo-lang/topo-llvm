@@ -1,0 +1,2 @@
+// class_template_constraint — Phase 4 micro-benchmark.
+namespace class_template_constraint_demo {}

@@ -1,0 +1,26 @@
+// 02_stages — fn blocks with stage annotations
+// Demonstrates: fn block, stage<N>, same-stage logical parallelism
+
+using int = std::cpp17::int;
+
+namespace app {
+
+  public:
+    void startup();
+
+    fn startup {
+      stage<1> init_logging();
+      stage<1> init_config();
+      stage<2> load_plugins();
+      stage<3> start_services();
+    }
+
+  protected:
+    void init_logging();
+    void init_config();
+    void load_plugins();
+    void start_services();
+
+  private:
+    void validate_config(const int flags);
+}

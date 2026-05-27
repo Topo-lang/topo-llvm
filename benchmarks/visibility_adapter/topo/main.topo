@@ -1,0 +1,33 @@
+// visibility_adapter — Visibility rules combined with adapters
+// Demonstrates: internal/private visibility + adapter declarations
+
+using int = std::cpp17::int;
+
+namespace codec {
+
+  public:
+    constraint Encoder {
+        int encode(T input);
+        int decode(T input);
+    }
+
+    type SimpleCodec {
+        public:
+            int encode(int input);
+            int decode(int input);
+    }
+
+    adapt Encoder for SimpleCodec {
+        encode = simple_encode;
+        decode = simple_decode;
+    }
+
+    int roundtrip(int value);
+
+  internal:
+    int simple_encode(int input);
+    int simple_decode(int input);
+
+  private:
+    int xor_key();
+}

@@ -1,0 +1,10 @@
+[project]
+name = "pipeline_rust"
+
+[topo]
+root = "topo/main.topo"
+
+[build]
+language = "rust"
+sources = ["src"]
+output = "pipeline_rust"

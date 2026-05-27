@@ -1,0 +1,20 @@
+// lifetime_unfriendly — only 2 large allocations per scope (below auto threshold).
+// Auto should skip; forced adds negligible overhead.
+
+using int = std::cpp17::int;
+
+namespace unfriendly_demo {
+  public:
+    int run_bench();
+
+    fn run_bench {
+      single_alloc -> single_process;
+      single_process -> int;
+    }
+
+    lifetime tiny_scope = single_alloc..single_process;
+
+  protected:
+    single_alloc() -> int;
+    single_process(int input) -> int;
+}

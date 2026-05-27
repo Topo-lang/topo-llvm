@@ -1,0 +1,394 @@
+// topo-build-llvm-mixed — LLVM backend for mixed C++/Rust projects
+//
+// Reads a JSON request file (argv[1]) from topo-build, executes Steps 3-7:
+//   3a. Compile C++ sources to LLVM IR
+//   3b. Compile Rust sources to LLVM bitcode
+//   4.  Load and link all IR modules (C++ + Rust)
+//   5.  Map symbols + verify Topo/IR consistency
+//   6.  Apply visibility + optimization passes + embed + obfuscate
+//   7.  Link optimized IR -> final binary (clang++ with Rust rlib)
+
+#include "CppDriver.h"
+#include "NinjaGen.h"
+#include "RustDriver.h"
+
+#include "topo/Basic/Diagnostic.h"
+#include "topo/Build/AutoLink.h"
+#include "topo/Build/BackendProtocol.h"
+#include "topo/Build/IncrementalCache.h"
+#include "topo/Backend/LLVMTransformBackend.h"
+#include "topo/Backend/PassReportsSidecar.h"
+#include "topo/Platform/Process.h"
+#include "topo/Platform/ToolResolution.h"
+
+#include <algorithm>
+#include <filesystem>
+#include <fstream>
+#include <iostream>
+#include <sstream>
+
+namespace fs = std::filesystem;
+
+// ============================================================
+// backendExtras per-value validators (LLVM mixed C++/Rust backend).
+// Combines the cpp + rust key sets and adds `mixedConfig` (object
+// with cppSources / cppIncludeDirs / cppFlags / rustManifest).
+// See topo-build-llvm-cpp/main.cpp for the wider rationale.
+// ============================================================
+
+static bool expectStringIfPresent(const nlohmann::json& extras, const char* key) {
+    if (!extras.contains(key)) return true;
+    const auto& v = extras.at(key);
+    if (!v.is_string()) {
+        std::cerr << "error: backendExtras." << key
+                  << ": expected string, got " << v.type_name() << "\n";
+        return false;
+    }
+    return true;
+}
+
+static bool expectObjectIfPresent(const nlohmann::json& extras, const char* key) {
+    if (!extras.contains(key)) return true;
+    const auto& v = extras.at(key);
+    if (!v.is_object()) {
+        std::cerr << "error: backendExtras." << key
+                  << ": expected object, got " << v.type_name() << "\n";
+        return false;
+    }
+    return true;
+}
+
+/// Validate the `mixedConfig` sub-object's own keys: `cppSources`,
+/// `cppIncludeDirs`, `cppFlags` (each an array of strings) and
+/// `rustManifest` (string). All are optional. Diagnostic shape:
+///   `error: backendExtras.mixedConfig.<key>: ...`
+static bool validateMixedConfig(const nlohmann::json& extras) {
+    if (!extras.contains("mixedConfig")) return true;
+    const auto& mc = extras.at("mixedConfig");
+    if (!mc.is_object()) return true; // caller already reported via expectObjectIfPresent
+
+    auto expectArrayOfStrings = [&](const char* sub) -> bool {
+        if (!mc.contains(sub)) return true;
+        const auto& arr = mc.at(sub);
+        if (!arr.is_array()) {
+            std::cerr << "error: backendExtras.mixedConfig." << sub
+                      << ": expected array, got " << arr.type_name() << "\n";
+            return false;
+        }
+        for (size_t i = 0; i < arr.size(); ++i) {
+            if (!arr[i].is_string()) {
+                std::cerr << "error: backendExtras.mixedConfig." << sub
+                          << "[" << i << "]: expected string, got "
+                          << arr[i].type_name() << "\n";
+                return false;
+            }
+        }
+        return true;
+    };
+    auto expectStringSub = [&](const char* sub) -> bool {
+        if (!mc.contains(sub)) return true;
+        const auto& v = mc.at(sub);
+        if (!v.is_string()) {
+            std::cerr << "error: backendExtras.mixedConfig." << sub
+                      << ": expected string, got " << v.type_name() << "\n";
+            return false;
+        }
+        return true;
+    };
+
+    if (!expectArrayOfStrings("cppSources")) return false;
+    if (!expectArrayOfStrings("cppIncludeDirs")) return false;
+    if (!expectArrayOfStrings("cppFlags")) return false;
+    if (!expectStringSub("rustManifest")) return false;
+    return true;
+}
+
+int main(int argc, char* argv[]) {
+    if (argc < 2) {
+        std::cerr << "Usage: " << argv[0] << " <request.json>\n"
+                  << "  Backend tool invoked by topo-build. Not intended for direct use.\n";
+        return 1;
+    }
+
+    // Read the JSON request file
+    std::string requestPath = argv[1];
+    std::ifstream ifs(requestPath);
+    if (!ifs) {
+        std::cerr << "error: cannot open request file '" << requestPath << "'\n";
+        return 1;
+    }
+
+    std::ostringstream buf;
+    buf << ifs.rdbuf();
+    std::string jsonStr = buf.str();
+
+    topo::build::BackendRequest req;
+    if (!topo::build::deserializeBackendRequest(jsonStr, req)) {
+        std::cerr << "error: failed to parse backend request JSON\n";
+        return 1;
+    }
+
+    // Per-value validation of backendExtras inputs (see topo-build-llvm-cpp
+    // for the rationale). Catches typos before clang/cargo is reached.
+    if (!expectStringIfPresent(req.backendExtras, "hostCompilerPath")) return 1;
+    if (!expectStringIfPresent(req.backendExtras, "standard")) return 1;
+    if (!expectStringIfPresent(req.backendExtras, "cargoPath")) return 1;
+    if (!expectObjectIfPresent(req.backendExtras, "mixedConfig")) return 1;
+    if (!validateMixedConfig(req.backendExtras)) return 1;
+
+    // Extract mixed config from backendExtras
+    auto mixedJ = req.backendExtras.value("mixedConfig", nlohmann::json::object());
+    std::vector<std::string> cppSources = mixedJ.value("cppSources", std::vector<std::string>{});
+    std::vector<std::string> cppIncludeDirs = mixedJ.value("cppIncludeDirs", std::vector<std::string>{});
+    std::vector<std::string> cppFlags = mixedJ.value("cppFlags", std::vector<std::string>{});
+    std::string rustManifest = mixedJ.value("rustManifest", std::string{});
+
+    std::string hostCompiler = req.backendExtras.value("hostCompilerPath", std::string());
+    std::string standard = req.backendExtras.value("standard", std::string("c++17"));
+    std::string cargoPath = req.backendExtras.value("cargoPath", std::string("cargo"));
+
+    fs::path tempDir(req.tempDir);
+
+    // ================================================================
+    // Step 3a: Compile C++ sources to LLVM IR
+    // ================================================================
+    std::cerr << "[3a/7] Compiling C++ sources...\n";
+
+    topo::build::BuildConfig cppCfg;
+    cppCfg.language = topo::HostLanguage::Cpp;
+    cppCfg.sources = cppSources;
+    cppCfg.includeDirs = cppIncludeDirs;
+    cppCfg.hostCompilerPath = hostCompiler.empty() ? topo::platform::resolveLLVMTool("clang++") : hostCompiler;
+    cppCfg.standard = standard;
+    cppCfg.outputType = req.config.outputType;
+    cppCfg.embedIR = req.config.embedIR;
+    cppCfg.adaptiveCfg = req.config.adaptiveCfg;
+    cppCfg.verbose = req.verbose;
+
+    std::vector<std::string> irFiles;
+
+    bool useIncremental = !req.noIncremental;
+    fs::path projectDir = fs::current_path();
+    topo::build::IncrementalCache cache(projectDir);
+
+    if (useIncremental && topo::build::NinjaGen::isAvailable()) {
+        auto result = topo::build::compileCppIncremental(cppCfg, cache.cacheDir());
+        if (result.exitCode != 0) return 1;
+        irFiles = std::move(result.outputFiles);
+    } else {
+        auto result = topo::build::compileCpp(cppCfg, useIncremental ? cache.irDir() : tempDir);
+        if (result.exitCode != 0) return 1;
+        irFiles = std::move(result.outputFiles);
+    }
+
+    std::cerr << "      C++ → " << irFiles.size() << " IR file(s)\n";
+
+    // ================================================================
+    // Step 3b: Compile Rust sources to LLVM bitcode
+    // ================================================================
+    std::cerr << "[3b/7] Compiling Rust sources...\n";
+
+    // For mixed projects we invoke cargo directly (without the topo/all-runtime
+    // feature flag that compileRust() adds, since the Rust sub-crate may be a
+    // plain staticlib without any Topo SDK dependency).
+    fs::path manifestPath = fs::absolute(rustManifest);
+    if (!fs::exists(manifestPath)) {
+        std::cerr << "error: Rust manifest not found: " << manifestPath << "\n";
+        return 1;
+    }
+
+    std::vector<std::string> cargoArgs = {"rustc",
+                                           "--lib",
+                                           "--manifest-path",
+                                           manifestPath.string(),
+                                           "--",
+                                           "--emit=llvm-bc",
+                                           "-Csymbol-mangling-version=v0",
+                                           "-Copt-level=1",
+                                           "-Cno-prepopulate-passes"};
+
+    auto cargoResult = topo::platform::runProcess(cargoPath, cargoArgs, req.verbose);
+    if (cargoResult.exitCode != 0) {
+        std::cerr << "error: cargo rustc failed (exit " << cargoResult.exitCode << ")\n";
+        return 1;
+    }
+
+    // Find the generated .bc file in target/debug/deps/
+    fs::path rustProjectDir = manifestPath.parent_path();
+    fs::path depsDir = rustProjectDir / "target" / "debug" / "deps";
+    std::string rlibPath;
+    std::string bcPath;
+
+    if (fs::exists(depsDir)) {
+        // Read crate name from Cargo.toml [package].name
+        std::string crateName;
+        {
+            std::ifstream mf(manifestPath);
+            std::string line;
+            while (std::getline(mf, line)) {
+                if (line.find("name") != std::string::npos && line.find('=') != std::string::npos) {
+                    auto eq = line.find('=');
+                    std::string val = line.substr(eq + 1);
+                    // Strip whitespace and quotes
+                    val.erase(0, val.find_first_not_of(" \t\"'"));
+                    val.erase(val.find_last_not_of(" \t\"'") + 1);
+                    crateName = val;
+                    // Replace hyphens with underscores (Rust crate convention)
+                    std::replace(crateName.begin(), crateName.end(), '-', '_');
+                    break;
+                }
+            }
+        }
+
+        for (const auto& entry : fs::directory_iterator(depsDir)) {
+            std::string fname = entry.path().filename().string();
+            if (fname.find(crateName) != std::string::npos) {
+                if (entry.path().extension() == ".bc") bcPath = entry.path().string();
+                if (entry.path().extension() == ".rlib") rlibPath = entry.path().string();
+            }
+        }
+    }
+
+    if (bcPath.empty()) {
+        std::cerr << "error: could not find Rust .bc file in " << depsDir << "\n";
+        return 1;
+    }
+
+    irFiles.push_back(bcPath);
+    std::cerr << "      Rust → 1 bitcode file(s)\n";
+
+    // ================================================================
+    // Steps 4-6: IR Transform Backend
+    // ================================================================
+    auto backend = topo::backend::createLLVMBackend();
+
+    // Step 4: Link all IR modules (C++ + Rust)
+    std::cerr << "[4/7] Linking " << irFiles.size() << " IR module(s) (C++ + Rust)...\n";
+
+    if (!backend->loadAndLink(irFiles)) {
+        return 1;
+    }
+
+    // Step 5: SymbolMapper + Verifier
+    std::cerr << "[5/7] Mapping and verifying symbols...\n";
+
+    auto mappingResult = backend->mapSymbols(req.visibilityEntries);
+
+    if (req.config.dumpMap) {
+        std::cerr << "=== Symbol Mapping ===\n";
+        std::cerr << "  Matched (" << mappingResult.matched.size() << "):\n";
+        for (const auto& [name, irName] : mappingResult.matched) {
+            std::cerr << "    " << name << " -> " << irName << "\n";
+        }
+        if (!mappingResult.unmatchedTopo.empty()) {
+            std::cerr << "  Unmatched Topo (" << mappingResult.unmatchedTopo.size() << "):\n";
+            for (const auto& name : mappingResult.unmatchedTopo) {
+                std::cerr << "    [warn] " << name << "\n";
+            }
+        }
+        std::cerr << "\n";
+    }
+
+    topo::DiagnosticEngine diag;
+
+    if (!req.config.noVerify) {
+        auto vr = backend->verify(diag, req.symbolTable, req.visibilityEntries);
+
+        if (!vr.passed()) {
+            std::cerr << "Verification failed:\n";
+            if (vr.publicMissing > 0) std::cerr << "  publicMissing: " << vr.publicMissing << "\n";
+            if (vr.blockMismatches > 0) std::cerr << "  blockMismatches: " << vr.blockMismatches << "\n";
+            if (vr.signatureMismatches > 0) std::cerr << "  signatureMismatches: " << vr.signatureMismatches << "\n";
+            if (vr.constMismatches > 0) std::cerr << "  constMismatches: " << vr.constMismatches << "\n";
+            if (vr.classMemberMissing > 0) std::cerr << "  classMemberMissing: " << vr.classMemberMissing << "\n";
+            if (vr.stageOrderViolations > 0) std::cerr << "  stageOrderViolations: " << vr.stageOrderViolations << "\n";
+            if (vr.pipelineEdgeMismatches > 0)
+                std::cerr << "  pipelineEdgeMismatches: " << vr.pipelineEdgeMismatches << "\n";
+            diag.print(std::cerr);
+            if (!req.config.warnOnly) return 1;
+            std::cerr << "      (continuing due to --warn-only)\n";
+        }
+    }
+
+    std::cerr << "      " << mappingResult.matched.size() << " symbols matched\n";
+
+    // Step 6: VisibilityApplier + PassPipeline
+    std::cerr << "[6/7] Applying visibility + O" << static_cast<int>(req.config.optLevel) << " optimization"
+              << (req.config.buildMode == topo::BuildMode::Aggressive ? " (aggressive/ThinLTO)" : "") << "...\n";
+
+    auto backendResult = backend->optimize(req.config, req.symbolTable, req.visibilityEntries);
+
+    std::cerr << "      visibility: " << backendResult.visibilityStats.publicCount << " public, "
+              << backendResult.visibilityStats.protectedCount << " protected, "
+              << backendResult.visibilityStats.privateCount << " private, "
+              << backendResult.visibilityStats.internalCount << " internal\n";
+
+    if (backendResult.embeddedIRBytes > 0) {
+        std::cerr << "      embedded " << backendResult.embeddedIRBytes << " bytes IR + "
+                  << backendResult.embeddedMetaBytes << " bytes metadata\n";
+    }
+
+    if (backendResult.obfuscation.renamedCount > 0) {
+        std::cerr << "      obfuscated " << backendResult.obfuscation.renamedCount << " symbol(s)\n";
+    }
+
+    // Write optimized IR
+    auto optIRPath = backend->writeIR(tempDir.string());
+    if (optIRPath.empty()) {
+        return 1;
+    }
+
+    if (req.config.dumpIR) {
+        std::string dumpPath = req.config.outputPath + ".ll";
+        if (backend->dumpIR(dumpPath)) {
+            std::cerr << "      IR dumped to " << dumpPath << "\n";
+        }
+    }
+
+    // ================================================================
+    // Step 7: Link optimized IR -> final output (C++ Driver + Rust rlib)
+    // ================================================================
+
+    // Use the C++ linker (clang++) as the primary linker, pass Rust rlib as input
+    topo::build::BuildConfig linkCfg;
+    linkCfg.language = topo::HostLanguage::Cpp;
+    linkCfg.outputPath = req.outputPath;
+    linkCfg.outputType = req.config.outputType;
+    linkCfg.optLevel = req.config.optLevel;
+    linkCfg.buildMode = req.config.buildMode;
+    linkCfg.hostCompilerPath = hostCompiler.empty() ? topo::platform::resolveLLVMTool("clang++") : hostCompiler;
+    linkCfg.standard = standard;
+    linkCfg.linkLibs = req.linkLibs;
+    linkCfg.linkDirs = req.linkDirs;
+    linkCfg.verbose = req.verbose;
+
+    // Add Rust rlib to link libraries if available
+    if (!rlibPath.empty()) {
+        linkCfg.linkLibs.push_back(rlibPath);
+    }
+
+    // Ensure runtime auto-link (covers direct backend invocation without topo-build)
+    topo::build::injectAutoLinkLibs(req.config, linkCfg.linkLibs, linkCfg.linkDirs);
+
+    auto linkResult = topo::build::linkCpp(linkCfg, optIRPath, tempDir, backendResult.jitExports);
+
+    if (linkResult.exitCode != 0) {
+        std::cerr << "error: linking failed (exit " << linkResult.exitCode << ")\n";
+        return 1;
+    }
+
+    // ================================================================
+    // Step 8: Per-Pass report sidecar (mirrors topo-build-llvm-cpp)
+    // ================================================================
+    {
+        auto* llvmBackend =
+            static_cast<topo::backend::LLVMTransformBackend*>(backend.get());
+        if (!topo::backend::writePassReportsSidecar(llvmBackend->passReports(),
+                                                    req.outputPath)) {
+            std::cerr << "warning: failed to write some Pass report sidecars "
+                         "(build continues)\n";
+        }
+    }
+
+    return 0;
+}

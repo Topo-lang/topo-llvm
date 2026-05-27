@@ -1,0 +1,289 @@
+// Stress test: many types, templates, constraints to measure performance scaling
+
+using Int    = std::cpp17::int32_t;
+using Bool   = std::cpp17::bool;
+using Float  = std::cpp17::float;
+using Double = std::cpp17::double;
+using Size   = std::cpp17::size_t;
+using Char   = std::cpp17::char;
+
+namespace stress {
+
+  public:
+
+    // 10 constraints
+    constraint Addable         { T add(T a, T b); }
+    constraint Subtractable    { T sub(T a, T b); }
+    constraint Multipliable    { T mul(T a, T b); }
+    constraint Dividable       { T div(T a, T b); }
+    constraint Comparable      { Bool cmp(T a, T b); }
+    constraint Hashable        { Size hash(T value); }
+    constraint Printable       { void print(T value); }
+    constraint Serializable    { void serialize(T value); }
+    constraint Cloneable       { T clone(T original); }
+    constraint Defaultable     { T default_value; }
+
+    // 10 type templates
+    template<typename T>
+    type Vector {
+        public:
+            void push_back(const T& value);
+            void pop_back();
+            T front() const;
+            T back() const;
+            Size size() const;
+            Bool empty() const;
+            T at(Int index) const;
+            void clear();
+        private:
+            T data;
+            Size count;
+            Size capacity;
+    }
+
+    template<typename T>
+    type List {
+        public:
+            void push_front(const T& value);
+            void push_back(const T& value);
+            T front() const;
+            T back() const;
+            Size size() const;
+        private:
+            T head;
+            T tail;
+    }
+
+    template<typename T>
+    type Stack {
+        public:
+            void push(const T& value);
+            T pop();
+            T top() const;
+            Bool empty() const;
+            Size size() const;
+    }
+
+    template<typename T>
+    type Queue {
+        public:
+            void enqueue(const T& value);
+            T dequeue();
+            T peek() const;
+            Bool empty() const;
+            Size size() const;
+    }
+
+    template<typename T>
+    type Set {
+        public:
+            void insert(const T& value);
+            void remove(const T& value);
+            Bool contains(const T& value) const;
+            Size size() const;
+    }
+
+    template<typename K, typename V>
+    type Map {
+        public:
+            void insert(K key, V value);
+            void remove(const K& key);
+            V get(const K& key) const;
+            Bool contains(const K& key) const;
+            Size size() const;
+        private:
+            Size bucket_count;
+    }
+
+    template<typename T, int N>
+    type Array {
+        public:
+            T at(Int index) const;
+            void set(Int index, T value);
+            static Int capacity();
+        private:
+            T storage;
+    }
+
+    template<typename T>
+    type Optional {
+        public:
+            Bool has_value() const;
+            T value() const;
+            T value_or(T default_val) const;
+    }
+
+    template<typename T>
+    type UniquePtr {
+        public:
+            T get() const;
+            T release();
+            void reset();
+            Bool is_null() const;
+    }
+
+    template<typename T>
+    type SharedPtr {
+        public:
+            T get() const;
+            Size use_count() const;
+            void reset();
+            Bool is_null() const;
+    }
+
+    // 10 regular types
+    type String {
+        public:
+            Size length() const;
+            Char at(Int index) const;
+            void append(const String& other);
+            Bool empty() const;
+            Int compare(const String& other) const;
+        private:
+            Char data;
+            Size len;
+    }
+
+    type StringBuilder {
+        public:
+            void append(const String& s);
+            void append_char(Char c);
+            String build() const;
+            Size length() const;
+    }
+
+    type FileReader {
+        public:
+            explicit FileReader(String path);
+            ~FileReader();
+            String read_line();
+            String read_all();
+            Bool eof() const;
+            void close();
+        private:
+            Int handle;
+    }
+
+    type FileWriter {
+        public:
+            explicit FileWriter(String path);
+            ~FileWriter();
+            void write(const String& data);
+            void write_line(const String& line);
+            void flush();
+            void close();
+        private:
+            Int handle;
+    }
+
+    type Logger {
+        public:
+            static void info(const String& msg);
+            static void warn(const String& msg);
+            static void error(const String& msg);
+            static void debug(const String& msg);
+        private:
+            static Int level;
+    }
+
+    type Timer {
+        public:
+            void start();
+            void stop();
+            Double elapsed_ms() const;
+            Double elapsed_us() const;
+        private:
+            Double start_time;
+            Double end_time;
+    }
+
+    type Random {
+        public:
+            explicit Random(Int seed);
+            Int next_int();
+            Float next_float();
+            Double next_double();
+            Int range(Int min, Int max);
+        private:
+            Int state;
+    }
+
+    type Color {
+        public:
+            explicit Color(Int r, Int g, Int b);
+            Int red() const;
+            Int green() const;
+            Int blue() const;
+            Float luminance() const;
+        private:
+            Int r_;
+            Int g_;
+            Int b_;
+    }
+
+    type Point2D {
+        public:
+            explicit Point2D(Float x, Float y);
+            Float x() const;
+            Float y() const;
+            Float distance(const Point2D& other) const;
+        private:
+            Float x_;
+            Float y_;
+    }
+
+    type Rect {
+        public:
+            explicit Rect(Float x, Float y, Float w, Float h);
+            Float area() const;
+            Float perimeter() const;
+            Bool contains(const Point2D& point) const;
+        private:
+            Float x_;
+            Float y_;
+            Float w_;
+            Float h_;
+    }
+
+    // 20 constrained template functions
+    template<typename T : Addable>       T sum(Vector<T> data);
+    template<typename T : Comparable>    T min(Vector<T> data);
+    template<typename T : Comparable>    T max(Vector<T> data);
+    template<typename T : Addable>       T average(Vector<T> data);
+    template<typename T : Comparable>    void sort(Vector<T> data);
+    template<typename T : Comparable>    Int binary_search(Vector<T> data, T target);
+    template<typename T : Printable>     void print_all(Vector<T> data);
+    template<typename T : Serializable>  void save(Vector<T> data, String path);
+    template<typename T : Cloneable>     Vector<T> deep_copy(Vector<T> source);
+    template<typename T : Hashable>      Map<Size, T> index_by_hash(Vector<T> data);
+    template<typename T : Addable>       T fold_left(Vector<T> data, T init);
+    template<typename T : Addable>       T fold_right(Vector<T> data, T init);
+    template<typename T : Comparable>    Vector<T> unique(Vector<T> data);
+    template<typename T : Comparable>    Vector<T> merge(Vector<T> a, Vector<T> b);
+    template<typename T : Comparable>    Bool is_sorted(Vector<T> data);
+    template<typename T : Printable>     void dump(Map<Int, T> data);
+    template<typename T : Cloneable>     Optional<T> try_clone(T source);
+    template<typename T : Hashable>      Size compute_hash(T value);
+    template<typename T : Defaultable>   Vector<T> make_filled(Int count);
+    template<typename T : Addable>       T accumulate(Vector<T> data);
+
+    // Explicit instantiations
+    instantiate Vector<Int>;
+    instantiate Vector<Float>;
+    instantiate Vector<Double>;
+    instantiate Vector<String>;
+    instantiate List<Int>;
+    instantiate List<Float>;
+    instantiate Stack<Int>;
+    instantiate Queue<Int>;
+    instantiate Set<Int>;
+    instantiate Set<String>;
+    instantiate Map<Int, String>;
+    instantiate Map<String, Int>;
+    instantiate Array<Float, 16>;
+    instantiate Array<Double, 64>;
+    instantiate Optional<Int>;
+    instantiate Optional<String>;
+    instantiate UniquePtr<String>;
+    instantiate SharedPtr<String>;
+}

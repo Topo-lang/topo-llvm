@@ -1,0 +1,19 @@
+# CMake build trees
+/build/
+/build-*/
+
+# vcpkg installed packages
+vcpkg_installed/
+
+# Bundled LLVM toolchain (downloaded by scripts/setup-llvm.sh, ~few GB).
+# In split-mode worktrees we symlink to the monorepo's llvm-dev/, which
+# matches the bare path (no trailing slash) so we exclude both forms.
+llvm-dev
+llvm-dev/
+
+# Editor / OS junk
+.DS_Store
+*.swp
+*~
+.vscode/
+.idea/

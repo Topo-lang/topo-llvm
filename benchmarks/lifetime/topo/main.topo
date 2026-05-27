@@ -1,0 +1,37 @@
+// 25_lifetime_arena — LifetimeArenaPass arena allocation
+
+using int = std::cpp17::int;
+
+// Friendly: many allocations, arena is beneficial
+namespace arena_demo {
+  public:
+    int run_bench();
+
+    fn run_bench {
+      alloc_work -> sum_work;
+      sum_work -> int;
+    }
+
+    lifetime arena_scope = alloc_work..sum_work;
+
+  protected:
+    alloc_work() -> int;
+    sum_work(int partial) -> int;
+}
+
+// Unfriendly: only 2 allocations, auto should skip
+namespace unfriendly_demo {
+  public:
+    int run_bench();
+
+    fn run_bench {
+      single_alloc -> single_process;
+      single_process -> int;
+    }
+
+    lifetime tiny_scope = single_alloc..single_process;
+
+  protected:
+    single_alloc() -> int;
+    single_process(int input) -> int;
+}

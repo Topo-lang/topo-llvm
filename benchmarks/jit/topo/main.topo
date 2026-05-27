@@ -1,0 +1,17 @@
+using int = std::cpp17::int;
+
+namespace processing {
+  public:
+    int run(int input);
+
+    fn run {
+      decode -> transform;
+      transform -> encode;
+      encode -> std::cpp17::int;
+    }
+
+  protected:
+    decode(int raw) -> int;
+    transform(int data) -> int;
+    encode(int data) -> int;
+}

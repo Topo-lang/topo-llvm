@@ -1,0 +1,2 @@
+// class_template_types — Phase 1 micro-benchmark (non-template classes).
+namespace class_template_types_demo {}

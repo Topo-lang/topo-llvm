@@ -1,0 +1,26 @@
+// 04_multi_return — Multi-return values and arrow bindings
+// Demonstrates: multi-return declaration, topo::tuple, arrow binding, discard
+
+using int = std::cpp17::int;
+
+namespace color {
+
+  public:
+    rgb_to_hsl(int r, int g, int b) -> (int h, int s, int l);
+    hsl_to_rgb(int h, int s, int l) -> (int r, int g, int b);
+    adjust_brightness(int r, int g, int b, int factor) -> (int r2, int g2, int b2);
+
+    void demo();
+
+    fn demo {
+      rgb_to_hsl() -> (h, s, l);
+      hsl_to_rgb() -> (r, g, b);
+      adjust_brightness() -> (nr, ng, nb);
+    }
+
+  protected:
+    clamp(int val, int lo, int hi) -> int;
+
+  private:
+    void normalize(int* val);
+}

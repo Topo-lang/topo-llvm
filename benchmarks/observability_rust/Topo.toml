@@ -1,0 +1,14 @@
+[project]
+name = "observability_rust"
+
+[topo]
+root = "topo/main.topo"
+
+[build]
+language = "rust"
+sources = ["src"]
+output = "observability_rust"
+
+[observability]
+mode = "force"
+exporter = "stdout"

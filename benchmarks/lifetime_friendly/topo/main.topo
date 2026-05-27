@@ -1,0 +1,20 @@
+// lifetime_friendly — arena-friendly only.
+// Scope contains >2000 allocations so auto threshold (>3) is clearly exceeded.
+
+using int = std::cpp17::int;
+
+namespace arena_demo {
+  public:
+    int run_bench();
+
+    fn run_bench {
+      alloc_work -> sum_work;
+      sum_work -> int;
+    }
+
+    lifetime arena_scope = alloc_work..sum_work;
+
+  protected:
+    alloc_work() -> int;
+    sum_work(int partial) -> int;
+}

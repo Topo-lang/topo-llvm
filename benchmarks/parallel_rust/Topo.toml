@@ -1,0 +1,13 @@
+[project]
+name = "parallel_rust"
+
+[topo]
+root = "topo/main.topo"
+
+[build]
+language = "rust"
+sources = ["src"]
+output = "parallel_rust"
+
+[parallel]
+mode = "force"

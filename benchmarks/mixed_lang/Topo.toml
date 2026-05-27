@@ -1,0 +1,16 @@
+[project]
+name = "mixed_lang"
+
+[topo]
+root = "topo/main.topo"
+
+[build]
+language = "mixed"
+output = "mixed_lang"
+
+[build.cpp]
+sources = ["src/*.cpp"]
+include = ["include"]
+
+[build.rust]
+manifest = "rust_lib/Cargo.toml"

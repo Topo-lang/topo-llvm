@@ -1,0 +1,34 @@
+// cross_module_adapter — Cross-module type adapter usage
+// Demonstrates: constraint, adapt, cross-namespace usage
+
+using int = std::cpp17::int;
+
+namespace types {
+
+  public:
+    constraint Summable {
+        int sum(const T& a, const T& b);
+    }
+
+    type Pair {
+        public:
+            int first();
+            int second();
+    }
+
+    adapt Summable for Pair {
+        sum = pair_sum;
+    }
+
+  protected:
+    int pair_sum(const Pair& a, const Pair& b);
+}
+
+namespace app {
+
+  public:
+    int run_adapter(int a, int b, int c, int d);
+
+  protected:
+    int combine(const types::Pair& p);
+}

@@ -1,0 +1,62 @@
+using int = std::cpp17::int;
+
+namespace pipeline {
+  public:
+    int process(int data);
+    int analyze(int data);
+    int transform(int data);
+    int compress(int data);
+
+    fn process {
+      load -> enhance;
+      load -> detect;
+      enhance -> merge;
+      detect -> merge;
+      merge -> std::cpp17::int;
+    }
+
+    fn analyze {
+      parse -> classify;
+      parse -> score;
+      classify -> summarize;
+      score -> summarize;
+      summarize -> std::cpp17::int;
+    }
+
+    fn transform {
+      decode -> normalize;
+      decode -> quantize;
+      normalize -> encode;
+      quantize -> encode;
+      encode -> std::cpp17::int;
+    }
+
+    fn compress {
+      scan -> deduplicate;
+      scan -> pack;
+      deduplicate -> finalize;
+      pack -> finalize;
+      finalize -> std::cpp17::int;
+    }
+
+  protected:
+    load(int data) -> int;
+    enhance(int pixels) -> int;
+    detect(int pixels) -> int;
+    merge(int a, int b) -> int;
+
+    parse(int data) -> int;
+    classify(int tokens) -> int;
+    score(int tokens) -> int;
+    summarize(int a, int b) -> int;
+
+    decode(int data) -> int;
+    normalize(int values) -> int;
+    quantize(int values) -> int;
+    encode(int a, int b) -> int;
+
+    scan(int data) -> int;
+    deduplicate(int blocks) -> int;
+    pack(int blocks) -> int;
+    finalize(int a, int b) -> int;
+}

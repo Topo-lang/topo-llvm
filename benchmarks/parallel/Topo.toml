@@ -1,0 +1,14 @@
+[project]
+name = "parallel_runtime"
+
+[topo]
+root = "topo/main.topo"
+
+[build]
+sources = ["src/*.cpp"]
+include = ["include", "../../../topo-lang-cpp/runtime/include", "../../runtime/include"]
+standard = "c++17"
+output = "parallel_runtime"
+
+[parallel]
+mode = "auto"

@@ -1,0 +1,15 @@
+[project]
+name = "obfuscation"
+
+[topo]
+root = "topo/main.topo"
+
+[build]
+sources = ["src/*.cpp"]
+include = ["include"]
+standard = "c++17"
+output = "obfuscation_forced"
+
+[builder]
+mode = "aggressive"
+obfuscation = "salted"

@@ -1,0 +1,18 @@
+[project]
+name = "pipeline"
+
+[topo]
+root = "topo/main.topo"
+
+[build]
+sources = ["src/*.cpp"]
+include = ["include", "../../../topo-lang-cpp/runtime/include", "../../runtime/include"]
+standard = "c++17"
+output = "pipeline_forced"
+
+[builder]
+mode = "aggressive"
+
+[parallel]
+mode = "force"
+min_tasks_to_parallelize = 2

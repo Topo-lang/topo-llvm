@@ -1,0 +1,21 @@
+[project]
+name = "adaptive_parallel"
+
+[topo]
+root = "topo/main.topo"
+
+[build]
+sources = ["src/*.cpp"]
+include = ["include", "../../../topo-lang-cpp/runtime/include", "../../runtime/include"]
+standard = "c++17"
+output = "adaptive_base"
+embed_ir = true
+link_libs = ["topo-adaptive", "topo-jit", "TopoPlatform"]
+
+[parallel]
+mode = "off"
+min_tasks_to_parallelize = 2
+instrument = true
+
+[adaptive]
+mode = "off"

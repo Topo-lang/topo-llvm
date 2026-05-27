@@ -1,0 +1,35 @@
+@PACKAGE_INIT@
+
+# topo-llvm CMake package config.
+#
+# Consumers do:
+#     find_package(topo-llvm CONFIG REQUIRED)
+#     target_link_libraries(<tgt> PRIVATE topo::llvm::topo-arena)
+#
+# topo-llvm's libs PUBLIC-link topo-core targets (TopoAST / TopoSema /
+# TopoAnalysis / TopoBuildLib / TopoProfile / TopoTranspile) and
+# nlohmann_json, so consumers need topo-core in CMAKE_PREFIX_PATH and
+# nlohmann-json available via vcpkg (or system).
+#
+# Note: topo-llvm install does NOT carry the bundled LLVM toolchain.
+# Consumers that link against topo::llvm::TopoBackend / TopoTransforms /
+# TopoDecompile / topo-jit-engine / TopoProfileLlvm transitively pull in
+# LLVM static archives. To link those, the consumer's build must locate
+# the same LLVM version — either via `brew install llvm@<major>` or by
+# downloading the bundled tarball into their own llvm-dev/.
+
+include(CMakeFindDependencyMacro)
+
+if(NOT TARGET topo::core::TopoAST)
+    find_dependency(topo-core CONFIG)
+endif()
+find_dependency(nlohmann_json CONFIG)
+
+# LLVM is a hard dependency of TopoBackend / TopoTransforms / TopoDecompile /
+# topo-jit-engine / TopoProfileLlvm. Without it, those imported targets'
+# transitive link list will reference missing LLVM static archives.
+find_dependency(LLVM CONFIG)
+
+include("${CMAKE_CURRENT_LIST_DIR}/topo-llvmTargets.cmake")
+
+check_required_components(topo-llvm)

@@ -1,0 +1,11 @@
+[project]
+name = "class_template_templates"
+
+[topo]
+root = "topo/main.topo"
+
+[build]
+sources = ["src/*.cpp"]
+include = ["include"]
+standard = "c++17"
+output = "class_template_templates_base"

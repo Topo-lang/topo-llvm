@@ -1,0 +1,14 @@
+[project]
+name = "priority"
+
+[topo]
+root = "topo/main.topo"
+
+[build]
+sources = ["src/*.cpp"]
+include = ["include"]
+standard = "c++17"
+output = "priority"
+
+[parallel]
+mode = "force"
