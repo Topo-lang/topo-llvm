@@ -25,9 +25,10 @@ add_library(TopoBackend
     LayoutCostModel.cpp
     VariantBenchmark.cpp
 )
+add_library(topo::llvm::TopoBackend ALIAS TopoBackend)
 
 target_include_directories(TopoBackend PUBLIC
-    $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/include>
+    $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>
     $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
 )
 

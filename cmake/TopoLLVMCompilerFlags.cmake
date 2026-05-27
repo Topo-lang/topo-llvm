@@ -78,10 +78,17 @@ function(topo_set_llvm_flags target)
 endfunction()
 
 # PCH helpers — no-ops in standalone (no project-wide PCH host).
-function(topo_apply_std_pch target)
-endfunction()
-function(topo_apply_std_pch_llvm target)
-endfunction()
+# Guarded so meta-repo embedding (which defines real PCH-applying versions
+# before adding topo-llvm as a subdirectory) wins; standalone configure
+# falls through and gets the no-op stubs below.
+if(NOT COMMAND topo_apply_std_pch)
+    function(topo_apply_std_pch target)
+    endfunction()
+endif()
+if(NOT COMMAND topo_apply_std_pch_llvm)
+    function(topo_apply_std_pch_llvm target)
+    endfunction()
+endif()
 
 # Resolve LLVM component names to a link-library list. When LLVM was
 # built with LLVM_BUILD_LLVM_DYLIB=ON (Homebrew, shared libLLVM.dylib),

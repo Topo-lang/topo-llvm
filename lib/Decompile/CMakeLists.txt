@@ -11,9 +11,10 @@ topo_llvm_libs(DECOMPILE_LLVM_LIBS
 add_library(TopoDecompile
     LLVMLifter.cpp
 )
+add_library(topo::llvm::TopoDecompile ALIAS TopoDecompile)
 
 target_include_directories(TopoDecompile PUBLIC
-    $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/include>
+    $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>
     $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
 )
 

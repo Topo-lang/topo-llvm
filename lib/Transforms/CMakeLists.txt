@@ -18,6 +18,7 @@ add_library(TopoTransforms
     PassFiredMarker.cpp
     RuntimeAbiCheck.cpp
 )
+add_library(topo::llvm::TopoTransforms ALIAS TopoTransforms)
 
 target_link_libraries(TopoTransforms PUBLIC
     TopoBackend

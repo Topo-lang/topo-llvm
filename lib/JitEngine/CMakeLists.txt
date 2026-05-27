@@ -26,10 +26,11 @@ topo_llvm_libs(JIT_LLVM_LIBS orcjit ${_native_asm_parser})
 add_library(topo-jit-engine SHARED
     topo_jit_engine.cpp
 )
+add_library(topo::llvm::topo-jit-engine ALIAS topo-jit-engine)
 
 target_include_directories(topo-jit-engine PRIVATE
-    ${CMAKE_SOURCE_DIR}/runtime/include
-    ${CMAKE_SOURCE_DIR}/include
+    ${PROJECT_SOURCE_DIR}/runtime/include
+    ${PROJECT_SOURCE_DIR}/include
 )
 if(TOPO_LANG_CPP_RUNTIME_INCLUDE)
     target_include_directories(topo-jit-engine PRIVATE ${TOPO_LANG_CPP_RUNTIME_INCLUDE})

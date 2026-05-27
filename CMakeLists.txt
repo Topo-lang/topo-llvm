@@ -52,7 +52,12 @@ include(llvm-detect)
 # the helper in TopoLLVMCompilerFlags.cmake is already a guarded no-op.
 
 # ── Upstream Topo packages ──────────────────────────────
-find_package(topo-core CONFIG REQUIRED)
+# Embedded-mode pattern: meta-repo add_subdirectory'd topo-core before us,
+# so topo::core::TopoBasic already exists as an ALIAS and find_package can
+# be skipped. Standalone configure falls through to find_package as today.
+if(NOT TARGET topo::core::TopoBasic)
+    find_package(topo-core CONFIG REQUIRED)
+endif()
 
 # ── External dependencies ───────────────────────────────
 find_package(nlohmann_json CONFIG REQUIRED)
@@ -74,6 +79,7 @@ endif()
 # include/topo/Transforms, include/topo/Decompile. Make them available
 # both at build time and after install.
 add_library(topo-llvm-headers INTERFACE)
+add_library(topo::llvm::topo-llvm-headers ALIAS topo-llvm-headers)
 target_include_directories(topo-llvm-headers INTERFACE
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
@@ -88,6 +94,7 @@ install(DIRECTORY include/topo
 # include/topo/rt — these are the headers user code includes via
 # <topo/rt/parallel_rt.h>, matching the monorepo layout.
 add_library(topo-llvm-runtime-headers INTERFACE)
+add_library(topo::llvm::topo-llvm-runtime-headers ALIAS topo-llvm-runtime-headers)
 target_include_directories(topo-llvm-runtime-headers INTERFACE
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/runtime/include>
     $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
@@ -132,20 +139,41 @@ option(TOPO_LLVM_BUILD_JIT_ENGINE
     "Build libtopo-jit-engine.{so,dylib,dll} (SHARED; needed for runtime JIT use)"
     ON)
 
-if(TOPO_LLVM_BUILD_TOOLS)
-    find_package(topo-lang-cpp CONFIG REQUIRED)
-    find_package(topo-lang-rust CONFIG REQUIRED)
-endif()
+# Embedded under the meta-repo: tools (which reverse-link
+# topo-lang-cpp / topo-lang-rust) and benchmarks (which consume topo-cli's
+# `topo-build` CLI) reach upward into packages that the meta only adds
+# AFTER topo-llvm. Meta sets TOPO_LLVM_DEFER_TOOLS=ON before
+# add_subdirectory(topo-llvm); the deferred blocks then re-fire from
+# topo-llvm/tools-late/CMakeLists.txt after lang-cpp/rust + topo-cli are
+# in scope. Standalone configure leaves the flag OFF and runs the blocks
+# inline as today.
+option(TOPO_LLVM_DEFER_TOOLS
+    "Skip tools + benchmarks here; a parent project will add topo-llvm/tools-late later"
+    OFF)
 
-# Benchmarks + e2e suite consume topo-build from topo-cli. find_package
-# runs early at top scope so the imported target is globally visible to
-# the benchmark subdirectory's add_custom_command DEPENDS list.
-if(TOPO_LLVM_BUILD_BENCHMARKS)
-    find_package(topo-cli CONFIG QUIET)
-    if(topo-cli_FOUND)
-        # Both benchmarks/ and test/e2e/ reference this. Set once at top
-        # scope so the bench-artifacts helper and the e2e CMakeLists agree.
-        set(TOPO_BUILD_TARGET topo::cli::topo-build)
+if(NOT TOPO_LLVM_DEFER_TOOLS)
+    if(TOPO_LLVM_BUILD_TOOLS)
+        if(NOT TARGET topo::lang-cpp::TopoCppPlugin)
+            find_package(topo-lang-cpp CONFIG REQUIRED)
+        endif()
+        if(NOT TARGET topo::lang-rust::TopoRustPlugin)
+            find_package(topo-lang-rust CONFIG REQUIRED)
+        endif()
+    endif()
+
+    # Benchmarks + e2e suite consume topo-build from topo-cli. find_package
+    # runs early at top scope so the imported target is globally visible to
+    # the benchmark subdirectory's add_custom_command DEPENDS list.
+    if(TOPO_LLVM_BUILD_BENCHMARKS)
+        if(NOT TARGET topo::cli::topo-build)
+            find_package(topo-cli CONFIG QUIET)
+        endif()
+        if(TARGET topo::cli::topo-build)
+            # Both benchmarks/ and test/e2e/ reference this. Set once at top
+            # scope so the bench-artifacts helper and the e2e CMakeLists agree.
+            set(TOPO_BUILD_TARGET topo::cli::topo-build)
+            set(topo-cli_FOUND TRUE)
+        endif()
     endif()
 endif()
 
@@ -170,7 +198,9 @@ endif()
 add_subdirectory(lib/Profile)
 
 # topo-build-llvm-{cpp,rust,mixed} backend tools (gated, see option above).
-if(TOPO_LLVM_BUILD_TOOLS)
+# Skipped here when TOPO_LLVM_DEFER_TOOLS=ON; meta-repo re-adds via
+# topo-llvm/tools-late/ after lang-cpp/rust are in scope.
+if(TOPO_LLVM_BUILD_TOOLS AND NOT TOPO_LLVM_DEFER_TOOLS)
     add_subdirectory(tools/topo-build-llvm-cpp)
     add_subdirectory(tools/topo-build-llvm-rust)
     add_subdirectory(tools/topo-build-llvm-mixed)
@@ -211,7 +241,7 @@ install(FILES
 )
 
 # ── Tests ───────────────────────────────────────────────
-if(TOPO_LLVM_BUILD_TESTS AND PROJECT_IS_TOP_LEVEL)
+if(TOPO_LLVM_BUILD_TESTS AND (PROJECT_IS_TOP_LEVEL OR TOPO_META_DRIVING_TESTS))
     enable_testing()
     include(FetchContent)
     FetchContent_Declare(googletest
@@ -237,7 +267,9 @@ endif()
 # The e2e binaries also require gate-1 (topo-build-llvm-mixed) — they shell
 # out to the LLVM backend tool during artifact builds. Sequenced AFTER the
 # test block so enable_testing() + GTest are visible to the e2e subdirectory.
-if(TOPO_LLVM_BUILD_BENCHMARKS)
+# Skipped here when TOPO_LLVM_DEFER_TOOLS=ON; meta-repo re-adds via
+# topo-llvm/tools-late/ after topo-cli is in scope.
+if(TOPO_LLVM_BUILD_BENCHMARKS AND NOT TOPO_LLVM_DEFER_TOOLS)
     if(NOT topo-cli_FOUND)
         message(WARNING
             "TOPO_LLVM_BUILD_BENCHMARKS=ON but topo-cli not found on "
@@ -251,7 +283,7 @@ if(TOPO_LLVM_BUILD_BENCHMARKS)
     else()
         message(STATUS "topo-llvm: TOPO_LLVM_BUILD_BENCHMARKS=ON — benchmarks + e2e enabled")
         add_subdirectory(benchmarks)
-        if(TOPO_LLVM_BUILD_TESTS AND PROJECT_IS_TOP_LEVEL)
+        if(TOPO_LLVM_BUILD_TESTS AND (PROJECT_IS_TOP_LEVEL OR TOPO_META_DRIVING_TESTS))
             add_subdirectory(test/e2e)
         endif()
     endif()

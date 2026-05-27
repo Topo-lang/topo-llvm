@@ -13,6 +13,7 @@
 
 # --- topo-parallel: stage parallelism runtime ---
 add_library(topo-parallel STATIC topo_parallel.cpp topo_cost.cpp)
+add_library(topo::llvm::topo-parallel ALIAS topo-parallel)
 target_include_directories(topo-parallel PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
@@ -28,6 +29,7 @@ target_link_libraries(topo-parallel PRIVATE Threads::Threads)
 # --- topo-jit-api: Lightweight JIT API stub, NO LLVM ---
 # Dynamically loads topo-jit-engine at runtime via SharedLibrary.
 add_library(topo-jit-api STATIC topo_jit_api.cpp)
+add_library(topo::llvm::topo-jit-api ALIAS topo-jit-api)
 target_include_directories(topo-jit-api PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
@@ -47,6 +49,7 @@ add_library(topo-jit ALIAS topo-jit-api)
 
 # --- topo-pass-event: reusable Pass-event NDJSON wire ---
 add_library(topo-pass-event STATIC topo_pass_event.cpp)
+add_library(topo::llvm::topo-pass-event ALIAS topo-pass-event)
 target_include_directories(topo-pass-event PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
@@ -59,6 +62,7 @@ target_link_libraries(topo-parallel PUBLIC topo-pass-event)
 
 # --- topo-adaptive: Adaptive JIT monitoring runtime ---
 add_library(topo-adaptive STATIC topo_adaptive.cpp topo_adaptive_register.cpp)
+add_library(topo::llvm::topo-adaptive ALIAS topo-adaptive)
 target_include_directories(topo-adaptive PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
@@ -76,6 +80,7 @@ target_link_libraries(topo-adaptive PRIVATE Threads::Threads)
 
 # --- topo-observe: Observability tracing runtime ---
 add_library(topo-observe STATIC topo_observe.cpp)
+add_library(topo::llvm::topo-observe ALIAS topo-observe)
 target_include_directories(topo-observe PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
@@ -87,6 +92,7 @@ target_link_libraries(topo-observe PRIVATE Threads::Threads)
 
 # --- topo-arena: Bump allocator for lifetime scoping ---
 add_library(topo-arena STATIC topo_arena.cpp)
+add_library(topo::llvm::topo-arena ALIAS topo-arena)
 target_include_directories(topo-arena PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
@@ -97,6 +103,7 @@ set_target_properties(topo-arena PROPERTIES CXX_EXTENSIONS OFF)
 
 # --- topo-containment: Containment violation recording runtime ---
 add_library(topo-containment STATIC topo_containment.cpp)
+add_library(topo::llvm::topo-containment ALIAS topo-containment)
 target_include_directories(topo-containment PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>

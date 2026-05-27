@@ -155,10 +155,10 @@ function(topo_register_bench_artifact_project project_dir)
         OUTPUT  "${_stamp}"
         COMMAND ${CMAKE_COMMAND}
                 ${_driver_args}
-                -P "${CMAKE_SOURCE_DIR}/cmake/TopoBenchArtifactsDriver.cmake"
+                -P "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/TopoBenchArtifactsDriver.cmake"
         DEPENDS ${_deps}
                 "$<TARGET_FILE:${TOPO_BUILD_TARGET}>"
-                "${CMAKE_SOURCE_DIR}/cmake/TopoBenchArtifactsDriver.cmake"
+                "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/TopoBenchArtifactsDriver.cmake"
         COMMENT "Pre-building benchmark variants for ${_name}"
         VERBATIM)
 

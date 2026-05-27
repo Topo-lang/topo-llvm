@@ -20,6 +20,7 @@ topo_llvm_libs(PROFILE_LLVM_LIBS
 add_library(TopoProfileLlvm
     Llvm/LlvmTTIProvider.cpp
 )
+add_library(topo::llvm::TopoProfileLlvm ALIAS TopoProfileLlvm)
 
 # `lib/` so the internal `Profile/Llvm/LlvmTTIProvider.h` include path
 # resolves. topo-core's TTIProvider seam header comes via the imported
