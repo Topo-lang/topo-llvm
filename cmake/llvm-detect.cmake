@@ -71,6 +71,22 @@ endif()
 find_package(LLVM REQUIRED CONFIG)
 message(STATUS "Found LLVM ${LLVM_PACKAGE_VERSION} at ${LLVM_DIR}")
 
+# Workaround: the bundled LLVM tarball used by topo-llvm CI bakes an
+# absolute path to /usr/lib/.../libzstd.a (non-PIC) into LLVMSupport's
+# INTERFACE_LINK_LIBRARIES on Linux. That static archive cannot be linked
+# into SHARED targets (e.g. libtopo-jit-engine.so), so the linker rejects
+# the SHARED build with "recompile with -fPIC". Substitute the .a path
+# with a shared-libzstd reference (`zstd`) when running on Linux against
+# a distribution that exhibits this.
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND TARGET LLVMSupport)
+    get_target_property(_llvm_support_iface LLVMSupport INTERFACE_LINK_LIBRARIES)
+    if(_llvm_support_iface MATCHES "libzstd\\.a")
+        message(STATUS "topo-llvm: substituting non-PIC libzstd.a → -lzstd in LLVMSupport interface")
+        string(REGEX REPLACE "[^;]*libzstd\\.a" "zstd" _llvm_support_iface "${_llvm_support_iface}")
+        set_target_properties(LLVMSupport PROPERTIES INTERFACE_LINK_LIBRARIES "${_llvm_support_iface}")
+    endif()
+endif()
+
 # Report link mode — set by the distribution's LLVMConfig.cmake. Homebrew
 # builds with LLVM_BUILD_LLVM_DYLIB=ON, bundled tarballs don't.
 # See cmake/TopoCompilerFlags.cmake -> topo_llvm_libs() for the switch.

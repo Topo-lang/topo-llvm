@@ -41,11 +41,27 @@ add_executable(topo-llvm-unit-tests
     unit/PassReportsSidecarSchemaTest.cpp
     unit/RuntimeAbiCheckInjectionTest.cpp
 )
-target_link_libraries(topo-llvm-unit-tests PRIVATE
-    TopoTransforms TopoDecompile
-    nlohmann_json::nlohmann_json
-    GTest::gtest_main
-)
+# TopoTransforms and TopoBackend form a static-archive cycle (TopoTransforms
+# uses TopoBackend's CodegenContext; some TopoBackend codegen references
+# TopoTransforms helpers). GNU ld's default single-pass archive scan misses
+# symbols across the cycle. Wrap the cyclic libs in --start-group/--end-group
+# on Linux to force multi-pass resolution; macOS ld64 does this natively;
+# Windows lld-link rsp expansion needs a separate fix.
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    target_link_libraries(topo-llvm-unit-tests PRIVATE
+        "-Wl,--start-group"
+        TopoTransforms TopoDecompile
+        "-Wl,--end-group"
+        nlohmann_json::nlohmann_json
+        GTest::gtest_main
+    )
+else()
+    target_link_libraries(topo-llvm-unit-tests PRIVATE
+        TopoTransforms TopoDecompile
+        nlohmann_json::nlohmann_json
+        GTest::gtest_main
+    )
+endif()
 target_compile_definitions(topo-llvm-unit-tests PRIVATE
     TOPO_TEST_FIXTURES_DIR="${TOPO_CORE_FIXTURES_DIR}"
 )
@@ -64,12 +80,23 @@ add_executable(topo-llvm-integration-tests
     integration/JITSpecializeTest.cpp
     integration/AdaptiveJITTest.cpp
 )
-target_link_libraries(topo-llvm-integration-tests PRIVATE
-    TopoTransforms
-    topo::core::TopoBuildConfig
-    nlohmann_json::nlohmann_json
-    GTest::gtest_main
-)
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    target_link_libraries(topo-llvm-integration-tests PRIVATE
+        "-Wl,--start-group"
+        TopoTransforms
+        topo::core::TopoBuildConfig
+        "-Wl,--end-group"
+        nlohmann_json::nlohmann_json
+        GTest::gtest_main
+    )
+else()
+    target_link_libraries(topo-llvm-integration-tests PRIVATE
+        TopoTransforms
+        topo::core::TopoBuildConfig
+        nlohmann_json::nlohmann_json
+        GTest::gtest_main
+    )
+endif()
 target_compile_definitions(topo-llvm-integration-tests PRIVATE
     TOPO_TEST_FIXTURES_DIR="${TOPO_CORE_FIXTURES_DIR}"
 )
