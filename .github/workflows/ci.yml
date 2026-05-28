@@ -40,14 +40,15 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # macos-14 re-added 2026-05-28 to probe whether the previously-
-        # observed bundled-clang dyld abort (Symbol not found: __ZdaPv
-        # during cmake's compiler check) still reproduces — the runner
-        # image may have been updated since the original observation,
-        # and the post-PIC + libzstd-redirect refactor changes nothing
-        # macOS-side but is worth a clean fresh-runner check. If macos-14
-        # fails again, revert to [ubuntu-24.04, windows-2022] and re-file.
-        os: [ubuntu-24.04, windows-2022, macos-14]
+        # macos-14 excluded: bundled LLVM 22.1.1
+        # `LLVM-22.1.1-macOS-ARM64.tar.xz` clang aborts during cmake's
+        # compiler check with `dyld: Symbol not found: __ZdaPv → Abort
+        # trap: 6`. Re-tested 2026-05-28 with the current runner image
+        # (post-PIC/libzstd refactor changes nothing macOS-side); same
+        # failure. Root cause is bundled-LLVM/macos-14 libc++ ABI; needs
+        # a bundled-LLVM rebuild or different runner image to resolve.
+        # Tracked under .aidesk/live/40-issue/topo-llvm-bundled-clang-macos-14-arm-symbol-not-found.md.
+        os: [ubuntu-24.04, windows-2022]
     steps:
       - uses: actions/checkout@v4
 
