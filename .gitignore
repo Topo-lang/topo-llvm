@@ -1,6 +1,5 @@
 # CMake build trees
 /build/
-/build-*/
 
 # vcpkg installed packages
 vcpkg_installed/
