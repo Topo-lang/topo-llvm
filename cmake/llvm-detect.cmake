@@ -71,38 +71,76 @@ endif()
 find_package(LLVM REQUIRED CONFIG)
 message(STATUS "Found LLVM ${LLVM_PACKAGE_VERSION} at ${LLVM_DIR}")
 
-# Workaround: the bundled LLVM tarball used by topo-llvm CI bakes an
-# absolute path to /usr/lib/.../libzstd.a (non-PIC) into some LLVM
-# imported target's INTERFACE_LINK_LIBRARIES on Linux. That static
-# archive cannot be linked into SHARED targets (e.g. libtopo-jit-engine.so),
-# so the linker rejects the SHARED build with "recompile with -fPIC".
-# Sweep every LLVM* and Clang* imported target and replace any
-# absolute libzstd.a path with -lzstd (the shared lib, which ships with
-# the same libzstd-dev package on every Ubuntu runner image).
+# Workaround: the bundled LLVM tarball on GHA Linux references the
+# non-PIC /usr/lib/x86_64-linux-gnu/libzstd.a, which cannot be linked
+# into SHARED targets (e.g. libtopo-jit-engine.so → "recompile with
+# -fPIC"). The reference comes via CMake imported targets — typical
+# names are zstd::libzstd_static or libzstd_static — whose
+# IMPORTED_LOCATION points at the .a. CMake resolves those at link
+# time, so string-grep on INTERFACE_LINK_LIBRARIES misses it.
+#
+# Patch every plausible zstd-static imported target's IMPORTED_LOCATION
+# to point at the corresponding .so on the runner. Ubuntu's
+# libzstd-dev package ships both .a and .so; the .so is PIC.
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     set(_topo_zstd_patched 0)
-    get_property(_topo_all_targets DIRECTORY PROPERTY IMPORTED_TARGETS)
-    # Imported targets aren't always exposed via the directory property
-    # for CONFIG-package imports; fall back to LLVM_AVAILABLE_LIBS which
-    # LLVMConfig.cmake always populates.
-    foreach(_tgt LLVMSupport ${LLVM_AVAILABLE_LIBS} ${_topo_all_targets})
+    set(_topo_zstd_so "")
+
+    # Resolve the system shared libzstd once (find_library prefers .so
+    # when both are present on the search path; fallback to the
+    # well-known Ubuntu path if find_library somehow returns nothing).
+    find_library(_topo_zstd_so_found NAMES zstd PATHS /usr/lib/x86_64-linux-gnu)
+    if(_topo_zstd_so_found)
+        set(_topo_zstd_so "${_topo_zstd_so_found}")
+    elseif(EXISTS "/usr/lib/x86_64-linux-gnu/libzstd.so")
+        set(_topo_zstd_so "/usr/lib/x86_64-linux-gnu/libzstd.so")
+    endif()
+
+    foreach(_tgt zstd::libzstd_static libzstd_static zstd::libzstd_shared libzstd zstd::zstd)
         if(TARGET ${_tgt})
-            get_target_property(_iface ${_tgt} INTERFACE_LINK_LIBRARIES)
-            if(_iface AND _iface MATCHES "libzstd\\.a")
-                string(REGEX REPLACE "[^;]*libzstd\\.a" "zstd" _iface "${_iface}")
-                set_target_properties(${_tgt} PROPERTIES INTERFACE_LINK_LIBRARIES "${_iface}")
+            get_target_property(_loc ${_tgt} IMPORTED_LOCATION)
+            if(NOT _loc)
+                # Try config-specific variants.
+                foreach(_cfg RELEASE DEBUG NOCONFIG RELWITHDEBINFO MINSIZEREL)
+                    get_target_property(_loc ${_tgt} IMPORTED_LOCATION_${_cfg})
+                    if(_loc)
+                        break()
+                    endif()
+                endforeach()
+            endif()
+            if(_loc MATCHES "libzstd\\.a$" AND _topo_zstd_so)
+                set_target_properties(${_tgt} PROPERTIES
+                    IMPORTED_LOCATION "${_topo_zstd_so}")
+                # Wipe config-specific overrides so the unconfigured
+                # IMPORTED_LOCATION wins.
+                foreach(_cfg RELEASE DEBUG NOCONFIG RELWITHDEBINFO MINSIZEREL)
+                    set_target_properties(${_tgt} PROPERTIES
+                        IMPORTED_LOCATION_${_cfg} "${_topo_zstd_so}")
+                endforeach()
                 math(EXPR _topo_zstd_patched "${_topo_zstd_patched} + 1")
-                message(STATUS "topo-llvm: substituted libzstd.a → -lzstd in ${_tgt}")
+                message(STATUS "topo-llvm: redirected ${_tgt} IMPORTED_LOCATION ${_loc} → ${_topo_zstd_so}")
+            elseif(_loc)
+                message(STATUS "topo-llvm: ${_tgt} IMPORTED_LOCATION = ${_loc} (not patched)")
             endif()
         endif()
     endforeach()
+
     if(_topo_zstd_patched EQUAL 0 AND TOPO_LLVM_BUILD_JIT_ENGINE)
-        message(WARNING "topo-llvm: libzstd.a substitution didn't fire on any "
-            "LLVM target — if the SHARED jit-engine link fails with a "
-            "non-PIC libzstd.a complaint, that path is coming from somewhere "
-            "this sweep misses.")
+        message(WARNING "topo-llvm: no zstd-static imported target found "
+            "to patch. The SHARED jit-engine link will likely fail with "
+            "a non-PIC libzstd.a complaint. Found zstd.so: ${_topo_zstd_so}. "
+            "Dump of plausible zstd targets follows:")
+        foreach(_tgt zstd::libzstd_static libzstd_static zstd::libzstd_shared
+                     libzstd zstd::zstd ZSTD::ZSTD)
+            if(TARGET ${_tgt})
+                get_target_property(_loc ${_tgt} IMPORTED_LOCATION)
+                message(STATUS "  target ${_tgt}: IMPORTED_LOCATION=${_loc}")
+            else()
+                message(STATUS "  target ${_tgt}: does not exist")
+            endif()
+        endforeach()
     else()
-        message(STATUS "topo-llvm: libzstd.a → -lzstd substitution patched ${_topo_zstd_patched} target(s)")
+        message(STATUS "topo-llvm: zstd-static → shared redirection patched ${_topo_zstd_patched} target(s)")
     endif()
 endif()
 
