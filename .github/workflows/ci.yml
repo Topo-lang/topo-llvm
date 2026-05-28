@@ -40,15 +40,17 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # macos-14 excluded: bundled LLVM 22.1.1
-        # `LLVM-22.1.1-macOS-ARM64.tar.xz` clang aborts during cmake's
-        # compiler check with `dyld: Symbol not found: __ZdaPv → Abort
-        # trap: 6`. Re-tested 2026-05-28 with the current runner image
-        # (post-PIC/libzstd refactor changes nothing macOS-side); same
-        # failure. Root cause is bundled-LLVM/macos-14 libc++ ABI; needs
-        # a bundled-LLVM rebuild or different runner image to resolve.
-        # Tracked under .aidesk/live/40-issue/topo-llvm-bundled-clang-macos-14-arm-symbol-not-found.md.
-        os: [ubuntu-24.04, windows-2022]
+        # macos-14 uses Homebrew llvm@22 instead of the bundled tarball:
+        # bundled `LLVM-22.1.1-macOS-ARM64.tar.xz` clang aborts during
+        # cmake's compiler check with `dyld: Symbol not found: __ZdaPv →
+        # Abort trap: 6` (libc++ ABI mismatch). Brew-installed llvm@22
+        # links against the runner's libc++ and works. The bundled-LLVM
+        # download/cache steps below are skipped on macOS, and topo-llvm's
+        # cmake/llvm-detect.cmake auto-prefers brew llvm@<major> when
+        # llvm-dev/ is absent. Apple clang from Xcode CLT drives cmake's
+        # compiler probe (the bundled-clang auto-pick in CMakeLists.txt:7
+        # is gated on EXISTS llvm-dev/bin/clang++).
+        os: [ubuntu-24.04, macos-14, windows-2022]
     steps:
       - uses: actions/checkout@v4
 
@@ -58,7 +60,7 @@ jobs:
 
       - name: Install build deps (macos)
         if: runner.os == 'macOS'
-        run: brew install ninja
+        run: brew install ninja llvm@22
 
       - name: Export GHA cache env (for vcpkg x-gha backend)
         uses: actions/github-script@v7
@@ -79,7 +81,11 @@ jobs:
 
       # The bundled LLVM tarball is ~1 GB; caching it keeps PR builds
       # workable. Keyed on .llvm-version so a version bump invalidates.
+      # Skipped on macOS — Homebrew llvm@22 is used instead (see matrix
+      # comment above); bundled clang ABI is incompatible with the
+      # macos-14 runner's libc++.
       - name: Cache bundled LLVM
+        if: runner.os != 'macOS'
         id: llvm-cache
         uses: actions/cache@v4
         with:
@@ -87,7 +93,7 @@ jobs:
           key: llvm-dev-${{ steps.llvm-ver.outputs.version }}-${{ matrix.os }}-v1
 
       - name: Download bundled LLVM
-        if: steps.llvm-cache.outputs.cache-hit != 'true'
+        if: runner.os != 'macOS' && steps.llvm-cache.outputs.cache-hit != 'true'
         run: bash scripts/setup-llvm.sh
 
       - name: Cache upstream installs
