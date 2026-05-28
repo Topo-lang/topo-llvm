@@ -1,4 +1,5 @@
-# Plan 28 Phase 6 — topo-bench-artifacts per-project driver.
+# topo-bench-artifacts per-project driver: builds every benchmark variant
+# for one project (vanilla baseline + topo base/auto/forced).
 #
 # Invoked as:
 #   cmake -P TopoBenchArtifactsDriver.cmake

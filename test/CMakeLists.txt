@@ -4,9 +4,8 @@
 # integration tests. The e2e/ suite (functional / equivalence / perf /
 # pass-bench / decompile) is intentionally not added — it depends on the
 # `topo-build` CLI binary (owned by topo-cli) and on per-project test
-# resource locks that live in the monorepo. e2e is documented as
-# deferred in .aidesk/live/40-issue/split-topo-llvm-tools-benchmarks-deferred.md
-# alongside the tools + benchmarks gates.
+# resource locks that live in the monorepo, alongside the tools and
+# benchmarks gates.
 
 # topo-core's Config.cmake exposes TOPO_CORE_FIXTURES_DIR via its
 # install set (D4). Tests read .topo source files relative to it.

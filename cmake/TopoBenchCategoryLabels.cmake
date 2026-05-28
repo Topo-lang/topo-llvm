@@ -1,4 +1,5 @@
-# Plan 28 Phase 4 — per-case category label injection.
+# Per-case category label injection: tags each discovered benchmark gtest
+# case with its CATEGORY_BENCH_TEST_F category for ctest label filtering.
 #
 # Usage:
 #   topo_inject_bench_category_labels(<source>)

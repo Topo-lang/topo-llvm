@@ -1,4 +1,5 @@
-# Plan 28 Phase 6 — topo-bench-artifacts target assembly.
+# topo-bench-artifacts target assembly: aggregates per-benchmark variants
+# into a single buildable target.
 #
 # Provides:
 #   topo_register_bench_artifact_project(<project_dir> [VANILLA_CPP] [VANILLA_JAVA])
@@ -182,7 +183,7 @@ function(topo_finalize_bench_artifacts_target)
         # just add the new deps to it.
     else()
         add_custom_target(topo-bench-artifacts
-            COMMENT "Plan 28 topo-bench-artifacts — pre-build all benchmark variants")
+            COMMENT "topo-bench-artifacts — pre-build all benchmark variants")
     endif()
 
     # Attach every stamp as a dependency. `add_custom_target(... DEPENDS ...)`
