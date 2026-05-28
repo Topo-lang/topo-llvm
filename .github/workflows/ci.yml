@@ -92,7 +92,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ${{ runner.temp }}/topo-install
-          key: topo-upstream-${{ env.TOPO_CORE_REF }}-${{ env.TOPO_LANG_REF }}-${{ env.TOPO_LANG_CPP_REF }}-${{ matrix.os }}-v2
+          key: topo-upstream-${{ env.TOPO_CORE_REF }}-${{ env.TOPO_LANG_REF }}-${{ env.TOPO_LANG_CPP_REF }}-${{ matrix.os }}-v3-pic
 
       - name: Build & install topo-core (zero-LLVM, lang-less)
         if: steps.upstream-cache.outputs.cache-hit != 'true'
@@ -104,7 +104,8 @@ jobs:
                 -B "${RUNNER_TEMP}/topo-core-build" \
                 -G Ninja -DCMAKE_BUILD_TYPE=Release \
                 -DCMAKE_INSTALL_PREFIX="${RUNNER_TEMP}/topo-install" \
-                -DCMAKE_TOOLCHAIN_FILE="${VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake"
+                -DCMAKE_TOOLCHAIN_FILE="${VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake" \
+                -DCMAKE_POSITION_INDEPENDENT_CODE=ON
           cmake --build "${RUNNER_TEMP}/topo-core-build" --target install
 
       - name: Build & install topo-lang
@@ -118,7 +119,8 @@ jobs:
                 -G Ninja -DCMAKE_BUILD_TYPE=Release \
                 -DCMAKE_INSTALL_PREFIX="${RUNNER_TEMP}/topo-install" \
                 -DCMAKE_PREFIX_PATH="${RUNNER_TEMP}/topo-install" \
-                -DCMAKE_TOOLCHAIN_FILE="${VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake"
+                -DCMAKE_TOOLCHAIN_FILE="${VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake" \
+                -DCMAKE_POSITION_INDEPENDENT_CODE=ON
           cmake --build "${RUNNER_TEMP}/topo-lang-build" --target install
 
       # Re-install topo-core to flip TOPO_CORE_WITH_LANG ON now that
@@ -131,7 +133,8 @@ jobs:
         run: |
           cmake -S "${RUNNER_TEMP}/topo-core-src" \
                 -B "${RUNNER_TEMP}/topo-core-build" \
-                -DCMAKE_PREFIX_PATH="${RUNNER_TEMP}/topo-install"
+                -DCMAKE_PREFIX_PATH="${RUNNER_TEMP}/topo-install" \
+                -DCMAKE_POSITION_INDEPENDENT_CODE=ON
           cmake --build "${RUNNER_TEMP}/topo-core-build" --target install
 
       # Install topo-lang-cpp at its default scope (ENABLE_LLVM=OFF) — we
@@ -148,7 +151,8 @@ jobs:
                 -G Ninja -DCMAKE_BUILD_TYPE=Release \
                 -DCMAKE_INSTALL_PREFIX="${RUNNER_TEMP}/topo-install" \
                 -DCMAKE_PREFIX_PATH="${RUNNER_TEMP}/topo-install" \
-                -DCMAKE_TOOLCHAIN_FILE="${VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake"
+                -DCMAKE_TOOLCHAIN_FILE="${VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake" \
+                -DCMAKE_POSITION_INDEPENDENT_CODE=ON
           cmake --build "${RUNNER_TEMP}/topo-lang-cpp-build" --target install
 
       - name: Configure topo-llvm (core scope, tools=OFF)

@@ -28,6 +28,15 @@ project(topo-llvm
 include(GNUInstallDirs)
 include(CMakePackageConfigHelpers)
 
+# topo-jit-engine is a SHARED library that links several of topo-llvm's
+# static libs (TopoTransforms, TopoBackend, topo-pass-event, ...) plus
+# upstream topo-core static libs. On Linux ELF, static archives linked
+# into a .so must be built with -fPIC; otherwise the linker rejects
+# them with "recompile with -fPIC". Set globally so every static
+# target topo-llvm builds is link-compatible with SHARED consumers.
+# macOS and Windows always-PIC; setting it here is a no-op there.
+set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 include(TopoLLVMCompilerFlags)
 
