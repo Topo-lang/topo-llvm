@@ -82,10 +82,3 @@ the same shape applies to the other six libraries.
 4. Add or update a runtime test that constructs the new entry point
    surface and asserts both the introspection symbol and the macro
    agree.
-
-## Cross-reference
-
-This file is the spec referenced by the principle
-[`.aidesk/base/20-principle/architecture/cross-component-contracts-must-be-versioned-and-tested.md`](../../.aidesk/base/20-principle/architecture/cross-component-contracts-must-be-versioned-and-tested.md)
-and closes the audit issue
-[`.aidesk/live/40-issue/topo-llvm-runtime-c-abi-versioning-gap.md`](../../.aidesk/live/40-issue/topo-llvm-runtime-c-abi-versioning-gap.md).
