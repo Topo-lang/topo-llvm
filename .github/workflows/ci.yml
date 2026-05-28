@@ -128,27 +128,12 @@ jobs:
       # lib/Transpile (PUBLIC-dep on topo::lang::TopoLang) into the
       # TopoCoreTargets export set, which topo-llvm core needs
       # (TopoBackend links topo::core::TopoBuildLib).
-      #
-      # Wipe the previously-installed topo-core artifacts first — leaving
-      # them in place causes "Some (but not all) targets in this export
-      # set were already defined" at re-configure time (the on-disk
-      # TopoCoreTargets.cmake from the lang-less install gets included
-      # before the new install rewrites it).
       - name: Re-install topo-core (with-lang)
         if: steps.upstream-cache.outputs.cache-hit != 'true'
         run: |
-          # Wipe only topo-core's CMake export files (not headers / libs —
-          # those overwrite cleanly on re-install). Removing the build dir
-          # forces a fresh configure with the new CMAKE_POSITION_INDEPENDENT_CODE
-          # + WITH_LANG=ON state (cached CMakeCache.txt confuses the re-flip).
-          rm -rf "${RUNNER_TEMP}/topo-core-build" \
-                 "${RUNNER_TEMP}/topo-install/lib/cmake/topo-core"
           cmake -S "${RUNNER_TEMP}/topo-core-src" \
                 -B "${RUNNER_TEMP}/topo-core-build" \
-                -G Ninja -DCMAKE_BUILD_TYPE=Release \
-                -DCMAKE_INSTALL_PREFIX="${RUNNER_TEMP}/topo-install" \
                 -DCMAKE_PREFIX_PATH="${RUNNER_TEMP}/topo-install" \
-                -DCMAKE_TOOLCHAIN_FILE="${VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake" \
                 -DCMAKE_POSITION_INDEPENDENT_CODE=ON
           cmake --build "${RUNNER_TEMP}/topo-core-build" --target install
 
