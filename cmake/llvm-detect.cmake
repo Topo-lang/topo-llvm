@@ -72,18 +72,37 @@ find_package(LLVM REQUIRED CONFIG)
 message(STATUS "Found LLVM ${LLVM_PACKAGE_VERSION} at ${LLVM_DIR}")
 
 # Workaround: the bundled LLVM tarball used by topo-llvm CI bakes an
-# absolute path to /usr/lib/.../libzstd.a (non-PIC) into LLVMSupport's
-# INTERFACE_LINK_LIBRARIES on Linux. That static archive cannot be linked
-# into SHARED targets (e.g. libtopo-jit-engine.so), so the linker rejects
-# the SHARED build with "recompile with -fPIC". Substitute the .a path
-# with a shared-libzstd reference (`zstd`) when running on Linux against
-# a distribution that exhibits this.
-if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND TARGET LLVMSupport)
-    get_target_property(_llvm_support_iface LLVMSupport INTERFACE_LINK_LIBRARIES)
-    if(_llvm_support_iface MATCHES "libzstd\\.a")
-        message(STATUS "topo-llvm: substituting non-PIC libzstd.a → -lzstd in LLVMSupport interface")
-        string(REGEX REPLACE "[^;]*libzstd\\.a" "zstd" _llvm_support_iface "${_llvm_support_iface}")
-        set_target_properties(LLVMSupport PROPERTIES INTERFACE_LINK_LIBRARIES "${_llvm_support_iface}")
+# absolute path to /usr/lib/.../libzstd.a (non-PIC) into some LLVM
+# imported target's INTERFACE_LINK_LIBRARIES on Linux. That static
+# archive cannot be linked into SHARED targets (e.g. libtopo-jit-engine.so),
+# so the linker rejects the SHARED build with "recompile with -fPIC".
+# Sweep every LLVM* and Clang* imported target and replace any
+# absolute libzstd.a path with -lzstd (the shared lib, which ships with
+# the same libzstd-dev package on every Ubuntu runner image).
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    set(_topo_zstd_patched 0)
+    get_property(_topo_all_targets DIRECTORY PROPERTY IMPORTED_TARGETS)
+    # Imported targets aren't always exposed via the directory property
+    # for CONFIG-package imports; fall back to LLVM_AVAILABLE_LIBS which
+    # LLVMConfig.cmake always populates.
+    foreach(_tgt LLVMSupport ${LLVM_AVAILABLE_LIBS} ${_topo_all_targets})
+        if(TARGET ${_tgt})
+            get_target_property(_iface ${_tgt} INTERFACE_LINK_LIBRARIES)
+            if(_iface AND _iface MATCHES "libzstd\\.a")
+                string(REGEX REPLACE "[^;]*libzstd\\.a" "zstd" _iface "${_iface}")
+                set_target_properties(${_tgt} PROPERTIES INTERFACE_LINK_LIBRARIES "${_iface}")
+                math(EXPR _topo_zstd_patched "${_topo_zstd_patched} + 1")
+                message(STATUS "topo-llvm: substituted libzstd.a → -lzstd in ${_tgt}")
+            endif()
+        endif()
+    endforeach()
+    if(_topo_zstd_patched EQUAL 0 AND TOPO_LLVM_BUILD_JIT_ENGINE)
+        message(WARNING "topo-llvm: libzstd.a substitution didn't fire on any "
+            "LLVM target — if the SHARED jit-engine link fails with a "
+            "non-PIC libzstd.a complaint, that path is coming from somewhere "
+            "this sweep misses.")
+    else()
+        message(STATUS "topo-llvm: libzstd.a → -lzstd substitution patched ${_topo_zstd_patched} target(s)")
     endif()
 endif()
 
