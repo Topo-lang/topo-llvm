@@ -41,16 +41,18 @@ add_executable(topo-llvm-unit-tests
     unit/PassReportsSidecarSchemaTest.cpp
     unit/RuntimeAbiCheckInjectionTest.cpp
 )
-# TopoTransforms and TopoBackend form a static-archive cycle (TopoTransforms
-# uses TopoBackend's CodegenContext; some TopoBackend codegen references
-# TopoTransforms helpers). GNU ld's default single-pass archive scan misses
-# symbols across the cycle. Wrap the cyclic libs in --start-group/--end-group
-# on Linux to force multi-pass resolution; macOS ld64 does this natively;
+# TopoTransforms ↔ TopoBackend form a static-archive cycle (TopoTransforms
+# uses TopoBackend's CodegenContext; TopoBackend's PassPipeline.cpp
+# references TopoTransforms pass entry points + topo-pass-event's
+# markPassFired). GNU ld's default single-pass scan misses symbols across
+# the cycle. Wrap ALL participants explicitly — including transitively-
+# pulled TopoBackend + topo-pass-event — in --start-group/--end-group on
+# Linux to force multi-pass resolution. macOS ld64 multi-passes natively;
 # Windows lld-link rsp expansion needs a separate fix.
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     target_link_libraries(topo-llvm-unit-tests PRIVATE
         "-Wl,--start-group"
-        TopoTransforms TopoDecompile
+        TopoTransforms TopoBackend TopoDecompile topo-pass-event
         "-Wl,--end-group"
         nlohmann_json::nlohmann_json
         GTest::gtest_main
@@ -83,7 +85,7 @@ add_executable(topo-llvm-integration-tests
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     target_link_libraries(topo-llvm-integration-tests PRIVATE
         "-Wl,--start-group"
-        TopoTransforms
+        TopoTransforms TopoBackend topo-pass-event
         topo::core::TopoBuildConfig
         "-Wl,--end-group"
         nlohmann_json::nlohmann_json
