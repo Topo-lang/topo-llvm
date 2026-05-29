@@ -5,12 +5,12 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
-  # Nightly benchmark + e2e run (the `benchmark` job below). 18:03 UTC
-  # ≈ 02:03 China time; staggered minute to dodge the top-of-hour scheduler
-  # backlog. Scheduled runs always use the workflow file on the default
-  # branch, so this fires only once merged to main.
-  schedule:
-    - cron: '3 18 * * *'
+  # NOTE: a nightly `schedule:` for the benchmark job is intentionally NOT
+  # wired yet — the benchmark artifact pipeline is still being brought up
+  # end-to-end (see the benchmark job; cmake stamp-scope fix landed, the
+  # standalone cpp↔llvm bootstrap link is still being sorted). Re-add
+  # `schedule: - cron: '3 18 * * *'` once the `benchmark` job is green via
+  # manual workflow_dispatch.
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
