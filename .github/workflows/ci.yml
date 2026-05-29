@@ -461,6 +461,21 @@ jobs:
       - name: Build
         run: cmake --build build
 
+      # Co-locate the per-language backend tools next to the imported topo-build
+      # (from the bootstrap install). The e2e tests invoke the INSTALLED
+      # topo-build (RUNNER_TEMP/topo-install/bin), which resolves backend tools
+      # by (1) sibling-of-argv[0] then (2) PATH. The harness's PATH injection
+      # works in the unified meta build but not here, so make sibling lookup
+      # succeed deterministically by copying the just-built tools into the
+      # install bin. (See issue: topo-build backend-tool PATH resolution differs
+      # in the standalone bootstrap; this is the robust co-location workaround.)
+      - name: Co-locate backend tools next to topo-build
+        run: |
+          cp build/tools/topo-build-llvm-cpp/topo-build-llvm-cpp \
+             build/tools/topo-build-llvm-rust/topo-build-llvm-rust \
+             build/tools/topo-build-llvm-mixed/topo-build-llvm-mixed \
+             "${RUNNER_TEMP}/topo-install/bin/"
+
       # Deterministic gate: e2e functional + equivalence + pass-fired, with the
       # wall-clock TIMING benches EXCLUDED (--label-exclude "perf|benchmark").
       # The timing suite serializes via the topo_bench_measure resource lock and
