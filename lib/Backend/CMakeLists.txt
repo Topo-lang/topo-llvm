@@ -43,6 +43,15 @@ target_link_libraries(TopoBackend
     # to put the archive on the link line via different routes; standalone
     # CI doesn't, so spell it out explicitly.
     PUBLIC  topo-pass-event
+    # Static-archive cycle back-edge: PassPipeline.cpp / LLVMTransformBackend.cpp
+    # (here in TopoBackend) call into TopoTransforms (pass run() methods,
+    # SymbolObfuscator::obfuscate, markPassFired(Module&,…)), while TopoTransforms
+    # already links TopoBackend PUBLIC for the reverse utilities. Declaring this
+    # edge is what activates the LINK_INTERFACE_MULTIPLICITY=3 set on both targets
+    # (in lib/Transforms/CMakeLists.txt) so ld re-emits both archives and resolves
+    # the cycle. Without it the multiplicity is dormant and a single-pass
+    # standalone link fails with "undefined reference to topo::…Pass::run / …".
+    PUBLIC  TopoTransforms
     PRIVATE ${LLVM_LIBS} nlohmann_json::nlohmann_json topo::core::TopoPlatform
 )
 
