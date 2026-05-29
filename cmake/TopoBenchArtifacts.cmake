@@ -77,6 +77,19 @@ function(topo_register_bench_artifact_project project_dir)
 
     set(_stamp "${CMAKE_BINARY_DIR}/artifacts/${_tag}-${_name}.stamp")
 
+    # Per-project target that owns this stamp. The aggregate depends on these
+    # TARGETS (target-level deps resolve across any directory scope) rather
+    # than on the stamp file paths: a file-level DEPENDS only links to its
+    # producing add_custom_command when that command sits in the same-or-
+    # ancestor scope, which fails when registration runs from a child
+    # (benchmarks/) scope or from two scopes in the meta build. Register each
+    # project exactly once — the meta registers some twice (a package's own
+    # add_subdirectory(benchmarks) plus a meta-root call).
+    set(_proj_target "topo-bench-artifact-${_tag}-${_name}")
+    if(TARGET ${_proj_target})
+        return()
+    endif()
+
     # Gather DEPENDS — configure-time list of every file CMake should watch.
     # Missing siblings (Topo-base.toml / Topo-forced.toml) are intentionally
     # skipped: the driver silently skips the corresponding variant.
@@ -163,11 +176,15 @@ function(topo_register_bench_artifact_project project_dir)
         COMMENT "Pre-building benchmark variants for ${_name}"
         VERBATIM)
 
-    # Append stamp to global list — read-modify-write the cache variable.
+    # Own the stamp with a per-project target IN THIS SCOPE so the file-level
+    # DEPENDS resolves locally; the aggregate then takes a target-level dep.
+    add_custom_target(${_proj_target} DEPENDS "${_stamp}")
+
+    # Append the TARGET NAME (not the stamp file) to the global list.
     set(_current ${TOPO_BENCH_ARTIFACT_STAMPS})
-    list(APPEND _current "${_stamp}")
+    list(APPEND _current "${_proj_target}")
     set(TOPO_BENCH_ARTIFACT_STAMPS "${_current}" CACHE INTERNAL
-        "List of topo-bench-artifact stamp files" FORCE)
+        "List of per-project topo-bench-artifact target names" FORCE)
 endfunction()
 
 # Single-invocation finaliser — call AFTER all registrations across both
@@ -186,15 +203,16 @@ function(topo_finalize_bench_artifacts_target)
             COMMENT "topo-bench-artifacts — pre-build all benchmark variants")
     endif()
 
-    # Attach every stamp as a dependency. `add_custom_target(... DEPENDS ...)`
-    # accepts file-level deps in CMake; the `topo-bench-artifacts-stamps`
-    # helper target exists solely to own those file deps (so the user-facing
-    # `topo-bench-artifacts` target stays a clean target-level alias).
+    # Depend on the per-project targets. Target-level dependencies resolve
+    # across directory scopes, unlike the file-level DEPENDS used previously
+    # (which silently failed when a project was registered in a child scope).
     if(TOPO_BENCH_ARTIFACT_STAMPS)
         list(LENGTH TOPO_BENCH_ARTIFACT_STAMPS _stamp_count)
         add_custom_target(topo-bench-artifacts-stamps
-            DEPENDS ${TOPO_BENCH_ARTIFACT_STAMPS}
             COMMENT "Building ${_stamp_count}-entry benchmark artifact set")
+        foreach(_proj_target IN LISTS TOPO_BENCH_ARTIFACT_STAMPS)
+            add_dependencies(topo-bench-artifacts-stamps ${_proj_target})
+        endforeach()
         # Runtime libs linked at topo-build dispatch time. A clean
         # `cmake --build build --target topo-bench-artifacts` would otherwise
         # fail with `ld: library 'topo-X' not found` before these targets are
