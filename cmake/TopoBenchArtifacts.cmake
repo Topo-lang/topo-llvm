@@ -4,15 +4,32 @@
 # Provides:
 #   topo_register_bench_artifact_project(<project_dir> [VANILLA_CPP] [VANILLA_JAVA])
 #     Adds an `add_custom_command(OUTPUT <stamp>, ...)` that pre-builds all
-#     benchmark variants for ONE project via TopoBenchArtifactsDriver.cmake.
-#     Each call appends <stamp> to the global TOPO_BENCH_ARTIFACT_STAMPS list.
+#     benchmark variants for ONE project via TopoBenchArtifactsDriver.cmake,
+#     wraps the stamp in a per-project custom target, and records that target
+#     name in the GLOBAL property TOPO_BENCH_ARTIFACT_TARGETS.
 #
 #   topo_finalize_bench_artifacts_target()
-#     Creates the `topo-bench-artifacts` custom target that depends on every
-#     registered stamp. Must be called after all registrations.
+#     Creates / extends the `topo-bench-artifacts` aggregate so it depends on
+#     every per-project target recorded so far. Idempotent and cumulative —
+#     call it after each package's registrations; the last call (meta root,
+#     after all packages registered) wires the complete set.
 #
 # Layout:
-#   build/artifacts/<project_name>.stamp   — per-project completion marker
+#   build/artifacts/<tag>-<project_name>.stamp   — per-project completion marker
+#   (tag = llvm | jvm, derived from the benchmarks tree's backend dir)
+#
+# Accumulator = a GLOBAL property, NOT a CACHE variable.
+#   This file is duplicated across three repos (meta cmake/, topo-jvm/cmake/,
+#   topo-llvm/cmake/). `include_guard(GLOBAL)` only guards re-inclusion of the
+#   SAME file, so in the meta union build all three copies' top-level code
+#   runs once each. A CACHE-variable accumulator reset at top level therefore
+#   got CLOBBERED every time a sibling copy was included, and the once-only
+#   finalize wired only whichever subset existed at the first finalize — the
+#   meta `topo-bench-artifacts` ended up depending on ~12 of 48 stamps. A
+#   GLOBAL property is fresh at the start of each configure (never persisted
+#   across configures like a cache entry, never reset mid-configure), so every
+#   copy's registrations accumulate into one list and a cumulative finalize
+#   picks up the full set regardless of include / add_subdirectory order.
 #
 # Incremental tracking:
 #   Each custom_command DEPENDS on Topo.toml / Topo-base.toml / Topo-forced.toml
@@ -27,20 +44,10 @@
 
 include_guard(GLOBAL)
 
-# Reset the per-configure stamp accumulator. Using CACHE INTERNAL with FORCE
-# so the reset takes effect on re-configure (otherwise the list would grow
-# unboundedly across cmake runs). `include_guard(GLOBAL)` ensures this block
-# runs exactly once per configure — subsequent `include(TopoBenchArtifacts.cmake)`
-# calls from sibling subdirectories are no-ops and do NOT re-reset the list,
-# so registrations from topo-llvm accumulate correctly with registrations
-# from topo-jvm.
-set(TOPO_BENCH_ARTIFACT_STAMPS "" CACHE INTERNAL
-    "List of topo-bench-artifact stamp files — one per benchmark project" FORCE)
-
-# Target name for the topo-build CLI. In the monorepo it is the locally-
-# defined `topo-build` executable; in standalone topo-llvm it is the
-# imported `topo::cli::topo-build` from `find_package(topo-cli)`. Callers
-# may override this before including TopoBenchArtifacts.cmake.
+# Target name for the topo-build CLI. In the monorepo / meta union build it is
+# the locally-defined `topo-build` executable; in a standalone backend repo it
+# is the imported `topo::cli::topo-build` from `find_package(topo-cli)`.
+# Callers may override this before including TopoBenchArtifacts.cmake.
 if(NOT DEFINED TOPO_BUILD_TARGET)
     set(TOPO_BUILD_TARGET topo-build)
 endif()
@@ -133,6 +140,25 @@ function(topo_register_bench_artifact_project project_dir)
         -DTOPO_BUILD_EXE=$<TARGET_FILE:${TOPO_BUILD_TARGET}>
         -DSTAMP_FILE=${_stamp})
 
+    # Expose the backend tools (topo-build-jvm-java / topo-build-llvm-*) to
+    # topo-build via PATH. topo-build resolves them by its own executable dir +
+    # PATH, but in a build tree they live in separate subdirs, not next to it.
+    # Pass the dirs of whichever backend tools exist; the driver prepends them
+    # to PATH before invoking topo-build (| separator — split in the driver).
+    set(_backend_tool_dirs "")
+    foreach(_bt topo-build-jvm-java topo-build-llvm-cpp topo-build-llvm-rust topo-build-llvm-mixed)
+        if(TARGET ${_bt})
+            if(_backend_tool_dirs STREQUAL "")
+                set(_backend_tool_dirs "$<TARGET_FILE_DIR:${_bt}>")
+            else()
+                set(_backend_tool_dirs "${_backend_tool_dirs}|$<TARGET_FILE_DIR:${_bt}>")
+            endif()
+        endif()
+    endforeach()
+    if(NOT _backend_tool_dirs STREQUAL "")
+        list(APPEND _driver_args "-DBACKEND_TOOL_DIRS=${_backend_tool_dirs}")
+    endif()
+
     if(_arg_VANILLA_CPP)
         # clang++ resolution mirrors E2eHarness::vanillaBuild — point at the
         # bundled LLVM dev toolchain.
@@ -155,11 +181,19 @@ function(topo_register_bench_artifact_project project_dir)
         if(DEFINED ENV{JAVA_HOME})
             list(APPEND _driver_args -DJAVA_HOME=$ENV{JAVA_HOME})
         endif()
-        # The runtime jar lives next to the topo-build executable in the
-        # layout produced by topo-lang-java's Gradle task.
-        list(APPEND _driver_args
-            -DBUILD_VANILLA_JAVA=ON
-            -DRUNTIME_JAR=$<TARGET_FILE_DIR:${TOPO_BUILD_TARGET}>/topo-runtime.jar)
+        # topo-runtime.jar is staged by deploy-topo-runtime-java POST_BUILD
+        # next to topo-build-jvm-java (NOT next to topo-build — that held only
+        # in the monorepo where both binaries shared one tools dir). Mirror the
+        # e2e harness's TOPO_RUNTIME_JAR_DIR = $<TARGET_FILE_DIR:topo-build-jvm-java>.
+        if(TARGET topo-build-jvm-java)
+            list(APPEND _driver_args
+                -DBUILD_VANILLA_JAVA=ON
+                -DRUNTIME_JAR=$<TARGET_FILE_DIR:topo-build-jvm-java>/topo-runtime.jar)
+        else()
+            list(APPEND _driver_args
+                -DBUILD_VANILLA_JAVA=ON
+                -DRUNTIME_JAR=$<TARGET_FILE_DIR:${TOPO_BUILD_TARGET}>/topo-runtime.jar)
+        endif()
     endif()
 
     # Express the topo-build dependency as a file path (works for both
@@ -180,62 +214,72 @@ function(topo_register_bench_artifact_project project_dir)
     # DEPENDS resolves locally; the aggregate then takes a target-level dep.
     add_custom_target(${_proj_target} DEPENDS "${_stamp}")
 
-    # Append the TARGET NAME (not the stamp file) to the global list.
-    set(_current ${TOPO_BENCH_ARTIFACT_STAMPS})
-    list(APPEND _current "${_proj_target}")
-    set(TOPO_BENCH_ARTIFACT_STAMPS "${_current}" CACHE INTERNAL
-        "List of per-project topo-bench-artifact target names" FORCE)
-endfunction()
-
-# Single-invocation finaliser — call AFTER all registrations across both
-# topo-llvm and topo-jvm have happened. Safe to call multiple times; CMake
-# target declaration is idempotent via include_guard + NOT TARGET check.
-function(topo_finalize_bench_artifacts_target)
-    if(TARGET topo-bench-artifacts-finalized)
-        return()
+    # Ensure the backend tool this project dispatches to is built before its
+    # driver runs — topo-build invokes it (and the driver exposes it via PATH).
+    if(_tag STREQUAL "jvm")
+        if(TARGET topo-build-jvm-java)
+            add_dependencies(${_proj_target} topo-build-jvm-java)
+        endif()
+    elseif(_tag STREQUAL "llvm")
+        foreach(_bt topo-build-llvm-mixed topo-build-llvm-cpp topo-build-llvm-rust)
+            if(TARGET ${_bt})
+                add_dependencies(${_proj_target} ${_bt})
+            endif()
+        endforeach()
     endif()
 
-    if(TARGET topo-bench-artifacts)
-        # Remove placeholder defined elsewhere — or more conservatively,
-        # just add the new deps to it.
-    else()
+    # Record the TARGET NAME in the GLOBAL property (scope- and file-
+    # independent, fresh each configure). Appending here, plus a cumulative
+    # finalize, makes the aggregate robust to include / subdirectory order
+    # across the three duplicated copies of this file.
+    set_property(GLOBAL APPEND PROPERTY TOPO_BENCH_ARTIFACT_TARGETS "${_proj_target}")
+endfunction()
+
+# Cumulative finaliser — safe to call any number of times, from any scope.
+# Each call (re)wires `topo-bench-artifacts` to every per-project target
+# recorded so far in the GLOBAL property. The per-package benchmarks/
+# CMakeLists and the meta root all call it; the meta root's call (after every
+# package has registered) is what guarantees the aggregate covers the full
+# union. add_dependencies / add_custom_target are idempotent under the NOT
+# TARGET guards, so repeated calls neither error nor duplicate work.
+function(topo_finalize_bench_artifacts_target)
+    if(NOT TARGET topo-bench-artifacts)
         add_custom_target(topo-bench-artifacts
             COMMENT "topo-bench-artifacts — pre-build all benchmark variants")
     endif()
-
-    # Depend on the per-project targets. Target-level dependencies resolve
-    # across directory scopes, unlike the file-level DEPENDS used previously
-    # (which silently failed when a project was registered in a child scope).
-    if(TOPO_BENCH_ARTIFACT_STAMPS)
-        list(LENGTH TOPO_BENCH_ARTIFACT_STAMPS _stamp_count)
+    if(NOT TARGET topo-bench-artifacts-stamps)
         add_custom_target(topo-bench-artifacts-stamps
-            COMMENT "Building ${_stamp_count}-entry benchmark artifact set")
-        foreach(_proj_target IN LISTS TOPO_BENCH_ARTIFACT_STAMPS)
-            add_dependencies(topo-bench-artifacts-stamps ${_proj_target})
-        endforeach()
-        # Runtime libs linked at topo-build dispatch time. A clean
-        # `cmake --build build --target topo-bench-artifacts` would otherwise
-        # fail with `ld: library 'topo-X' not found` before these targets are
-        # built. List mirrors topo-llvm/test/e2e/CMakeLists.txt:20 plus
-        # topo-containment (newer lib that was missing from both lists).
-        foreach(_dep
-                topo-build-llvm-mixed
-                topo-parallel
-                topo-jit
-                topo-adaptive
-                topo-arena
-                topo-observe
-                topo-containment)
-            if(TARGET ${_dep})
-                add_dependencies(topo-bench-artifacts-stamps ${_dep})
-            endif()
-        endforeach()
+            COMMENT "Building the benchmark artifact set")
         add_dependencies(topo-bench-artifacts topo-bench-artifacts-stamps)
     endif()
 
-    # Sentinel so re-entry is a no-op.
-    add_custom_target(topo-bench-artifacts-finalized)
-    add_dependencies(topo-bench-artifacts-finalized topo-bench-artifacts)
+    # Depend on every per-project target recorded so far. Target-level
+    # dependencies resolve across directory scopes, unlike the file-level
+    # DEPENDS used previously (which silently failed when a project was
+    # registered in a child scope).
+    get_property(_bench_targets GLOBAL PROPERTY TOPO_BENCH_ARTIFACT_TARGETS)
+    foreach(_proj_target IN LISTS _bench_targets)
+        if(TARGET ${_proj_target})
+            add_dependencies(topo-bench-artifacts-stamps ${_proj_target})
+        endif()
+    endforeach()
+
+    # Runtime libs linked at topo-build dispatch time. A clean
+    # `cmake --build build --target topo-bench-artifacts` would otherwise fail
+    # with `ld: library 'topo-X' not found` before these targets are built.
+    # List mirrors topo-llvm/test/e2e/CMakeLists.txt plus topo-containment.
+    foreach(_dep
+            topo-build-llvm-mixed
+            topo-parallel
+            topo-jit
+            topo-adaptive
+            topo-arena
+            topo-observe
+            topo-containment)
+        if(TARGET ${_dep})
+            add_dependencies(topo-bench-artifacts-stamps ${_dep})
+        endif()
+    endforeach()
 endfunction()
 
 # Scan helper — enumerates every subdirectory under `benchmarks_root` that

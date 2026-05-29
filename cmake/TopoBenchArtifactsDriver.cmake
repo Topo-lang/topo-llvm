@@ -53,6 +53,22 @@ if(NOT EXISTS "${TOPO_BUILD_EXE}")
     message(FATAL_ERROR "TopoBenchArtifactsDriver: topo-build not found: ${TOPO_BUILD_EXE}")
 endif()
 
+# Backend tools (topo-build-jvm-java / topo-build-llvm-*) are resolved by
+# topo-build via its own executable dir + PATH. In a build tree they are not
+# next to topo-build, so registration passes their dirs in BACKEND_TOOL_DIRS;
+# prepend them to PATH so the execute_process calls below inherit it.
+if(DEFINED BACKEND_TOOL_DIRS AND NOT BACKEND_TOOL_DIRS STREQUAL "")
+    string(REPLACE "|" ";" _backend_dir_list "${BACKEND_TOOL_DIRS}")
+    if(WIN32)
+        set(_path_sep ";")
+    else()
+        set(_path_sep ":")
+    endif()
+    foreach(_bd IN LISTS _backend_dir_list)
+        set(ENV{PATH} "${_bd}${_path_sep}$ENV{PATH}")
+    endforeach()
+endif()
+
 set(_topo_toml       "${PROJECT_DIR}/Topo.toml")
 set(_base_toml       "${PROJECT_DIR}/Topo-base.toml")
 set(_forced_toml     "${PROJECT_DIR}/Topo-forced.toml")
