@@ -112,7 +112,14 @@ RunResult E2eFixture::topoBuild(const std::string& projectName,
     // textual .ll write per build); E2E builds already write object files
     // and link binaries.
     auto r = platform::runProcessCapture(exe, {"--dump-ir"}, workDir);
-    return RunResult{r.exitCode, r.stdoutOutput};
+    // Merge stderr into the result: topo-build prints the ninja frontend
+    // progress to stdout, but the BACKEND tool's diagnostics (`error: backend
+    // tool '…' failed`, `error: linking failed`, a missing -L/-l, a crash) go
+    // to STDERR. The build asserts (EquivalenceTests / FunctionalTests) print
+    // RunResult.output on failure, so dropping stderr left every standalone
+    // build failure showing only "[1/2] CC …" with no cause. A build's output
+    // is never compared (only runBinary's stdout is), so merging is safe here.
+    return RunResult{r.exitCode, r.stdoutOutput + r.stderrOutput};
 }
 
 // ============================================================================
