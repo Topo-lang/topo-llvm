@@ -245,13 +245,21 @@ jobs:
           if [[ "${RUNNER_OS}" == "Windows" ]]; then
             CC_FLAG="-DCMAKE_C_COMPILER=${{ github.workspace }}/llvm-dev/bin/clang.exe"
             CXX_FLAG="-DCMAKE_CXX_COMPILER=${{ github.workspace }}/llvm-dev/bin/clang++.exe"
+            LLVM_PREFIX="${{ github.workspace }}/llvm-dev"
+          elif [[ "${RUNNER_OS}" == "macOS" ]]; then
+            # macOS uses Homebrew llvm@22 instead of the bundled tarball
+            # (see matrix comment at top); point find_dependency(LLVM) at it.
+            CC_FLAG=""
+            CXX_FLAG=""
+            LLVM_PREFIX="$(brew --prefix llvm@22)"
           else
             CC_FLAG=""
             CXX_FLAG=""
+            LLVM_PREFIX="${{ github.workspace }}/llvm-dev"
           fi
           cmake -S . -B build -G Ninja \
               ${CC_FLAG} ${CXX_FLAG} \
-              -DCMAKE_PREFIX_PATH="${RUNNER_TEMP}/llvm-install;${RUNNER_TEMP}/topo-install;${{ github.workspace }}/llvm-dev" \
+              -DCMAKE_PREFIX_PATH="${RUNNER_TEMP}/llvm-install;${RUNNER_TEMP}/topo-install;${LLVM_PREFIX}" \
               -DCMAKE_TOOLCHAIN_FILE="${VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake"
           cmake --build build
           ./build/smoke
