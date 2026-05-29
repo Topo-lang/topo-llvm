@@ -220,7 +220,10 @@ jobs:
           JSON
           cat > CMakeLists.txt <<'CMAKE'
           cmake_minimum_required(VERSION 3.20)
-          project(topo-llvm-find-package-smoke LANGUAGES CXX)
+          # Enable C as well: on macOS, brew llvm's LLVMConfig.cmake
+          # transitively find_package(LibEdit), and FindLibEdit calls
+          # check_include_file(histedit.h ...) which requires C enabled.
+          project(topo-llvm-find-package-smoke LANGUAGES C CXX)
           find_package(topo-llvm CONFIG REQUIRED)
           add_executable(smoke smoke.cpp)
           # topo-arena is a pure C-ABI archive — links cleanly without
