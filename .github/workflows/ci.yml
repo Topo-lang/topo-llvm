@@ -461,8 +461,15 @@ jobs:
       - name: Build
         run: cmake --build build
 
-      - name: Build benchmark artifacts
-        run: cmake --build build --target topo-bench-artifacts
-
-      - name: Test (e2e + benchmarks)
-        run: ctest --test-dir build -L e2e --output-on-failure --timeout 600
+      # Deterministic gate: e2e functional + equivalence + pass-fired, with the
+      # wall-clock TIMING benches EXCLUDED (--label-exclude "perf|benchmark").
+      # The timing suite serializes via the topo_bench_measure resource lock and
+      # runs 10 interleaved rounds per case → 40-90 min and prone to hangs on a
+      # shared runner (not a reliable regression signal there), so it is NOT a
+      # CI gate. Run it manually instead:
+      #   cmake --build build --target topo-bench-artifacts   # pre-build variants
+      #   ctest --test-dir build -L benchmark                 # measure
+      # Equivalence builds its variants on-demand (no pre-build needed here) and
+      # proves each pass fires AND preserves behavior (timing stripped).
+      - name: Test (e2e equivalence + pass-fired; timing excluded)
+        run: ctest --test-dir build -L e2e --label-exclude "perf|benchmark" --output-on-failure --timeout 300
