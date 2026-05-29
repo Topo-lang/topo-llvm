@@ -203,6 +203,18 @@ std::string LLVMTransformBackend::writeIR(const std::string& outputDir) {
         std::cerr << "error: cannot write IR: " << ec.message() << "\n";
         return "";
     }
+    // Emit debug info in the stable intrinsic form (`call void
+    // @llvm.dbg.value(...)`) rather than LLVM's newer debug-record syntax
+    // (`#dbg_value(...)`). This textual IR is re-parsed by the bundled
+    // clang at the link step (CppDriver::linkCpp); the LLVM 22 prebuilt's
+    // IR reader rejects `#dbg_value` with "expected instruction opcode",
+    // failing the link on a standalone build (the macOS meta build happened
+    // not to round-trip through this path). Normalising to the intrinsic
+    // form every LLVM version parses keeps the written .ll portable. The
+    // module is not used after this point (linkCpp re-reads the file), and
+    // the conversion leaves the `!topo.fired.<Pass>` named metadata — which
+    // the e2e harness scans — untouched.
+    module_->convertFromNewDbgValues();
     module_->print(irOut, nullptr);
     lastWrittenIRPath_ = path;
     return path;
