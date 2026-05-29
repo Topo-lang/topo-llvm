@@ -305,13 +305,19 @@ jobs:
       TOPO_CLI_REF: main
     steps:
       - uses: actions/checkout@v4
-      # libpython3.11: the bundled LLVM's liblldb.so (linked into topo-debug
-      # when topo-lang-cpp builds with ENABLE_LLVM=ON, which the benchmark
-      # toolchain does) has a runtime dependency on libpython3.11.so.1.0;
-      # ubuntu-24.04 ships 3.12, so the 3.11 runtime must be present or the
-      # link/load fails. macOS dyld resolves it automatically (local-only),
-      # so this is an ubuntu CI-only step.
-      - run: sudo apt-get update -qq && sudo apt-get install -y -qq ninja-build clangd libpython3.11
+      # ninja + clangd are required. libpython3.11 is BEST-EFFORT: the bundled
+      # LLVM's liblldb.so (linked into topo-debug when topo-lang-cpp builds
+      # with ENABLE_LLVM=ON) may want libpython3.11.so.1.0, but ubuntu-24.04
+      # (noble) ships 3.12 and has no libpython3.11 in its default repos, and
+      # lldb's Python is a soft/dlopen dependency. So install it only if
+      # available and never fail the step — if a later link/load actually
+      # needs it, that surfaces a precise error to act on (vs. a blind apt
+      # failure here). macOS dyld resolves this automatically (local-only).
+      - run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ninja-build clangd
+          sudo apt-get install -y -qq libpython3.11 \
+            || echo "note: libpython3.11 unavailable on this runner; relying on lldb Python being a soft dependency"
 
       - name: Export GHA cache env (for vcpkg x-gha backend)
         uses: actions/github-script@v7
