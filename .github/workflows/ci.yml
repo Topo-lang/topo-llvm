@@ -486,5 +486,26 @@ jobs:
       #   ctest --test-dir build -L benchmark                 # measure
       # Equivalence builds its variants on-demand (no pre-build needed here) and
       # proves each pass fires AND preserves behavior (timing stripped).
+      # Standalone shim: the benchmark Topo.toml files include the topo-lang-cpp
+      # runtime stdlib headers via a META-layout-relative path
+      # (<bench>/../../../topo-lang-cpp/runtime/include), which only resolves when
+      # topo-lang-cpp is a SIBLING checkout (the meta build). In standalone CI
+      # topo-lang-cpp is INSTALLED to the prefix, so that path is missing and the
+      # C++ fixtures fail at the IR-compile step with
+      # `fatal error: 'topo/*.h' file not found`. Expose the installed headers at
+      # the sibling path the benchmarks expect. (Proper fix: prefix-based stdlib
+      # include resolution in topo-build — topo-cli/tools/topo-build/Config.cpp.)
+      - name: Shim topo-lang-cpp runtime headers (standalone layout)
+        run: |
+          sib="$(dirname "${GITHUB_WORKSPACE}")/topo-lang-cpp/runtime"
+          mkdir -p "$sib"
+          ln -sfn "${RUNNER_TEMP}/topo-install/include" "$sib/include"
+          if [ -f "$sib/include/topo/tuple.h" ]; then
+            echo "OK: topo stdlib headers reachable at $sib/include/topo/"
+          else
+            echo "ERROR: topo/*.h not found under ${RUNNER_TEMP}/topo-install/include"
+            ls -la "${RUNNER_TEMP}/topo-install/include" || true
+            exit 1
+          fi
       - name: Test (e2e equivalence + pass-fired; timing excluded)
         run: ctest --test-dir build -L e2e --label-exclude "perf|benchmark" --output-on-failure --timeout 300
