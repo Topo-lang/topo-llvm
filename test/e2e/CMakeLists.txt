@@ -21,6 +21,12 @@ target_compile_definitions(E2eHarnessLlvm PUBLIC
     TOPO_E2E_FIXTURES_DIR="${TOPO_CORE_BUILD_FIXTURES_DIR}"
     TOPO_LLVM_BINDIR="${TOPO_LLVM_BINDIR}"
     TOPO_JIT_ENGINE_DIR="$<TARGET_FILE_DIR:topo-jit-engine>"
+    # Directory holding the topo runtime static archives (libtopo-parallel.a,
+    # …). vanillaBuild() points `-L` here to link benchmarks that declare
+    # [build].link_libs (currently only `pipeline` → topo-parallel). Baked in
+    # so the link resolves regardless of whether topo-build is a build-tree
+    # target (meta build) or the installed binary (standalone CI).
+    TOPO_LLVM_RUNTIME_DIR="$<TARGET_FILE_DIR:topo-parallel>"
     # Backend-tool dirs — colon-separated (semicolon on Windows). The harness
     # prepends every dir to PATH so the imported topo-build CLI resolves
     # sibling backend tools built in this repo.

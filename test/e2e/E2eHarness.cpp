@@ -375,12 +375,29 @@ RunResult E2eFixture::vanillaBuild(const std::string& projectName) {
             std::string(platform::IsWindows ? "" : "lib") + "topo-parallel" +
             std::string(platform::StaticLibSuffix);
         fs::path runtimeDir;
-        for (fs::path anc = topoBuildExe_.parent_path();
-             !anc.empty() && anc != anc.root_path(); anc = anc.parent_path()) {
-            fs::path cand = anc / "topo-llvm" / "runtime";
-            if (fs::exists(cand / parallelArchive)) {
-                runtimeDir = cand;
-                break;
+        // Primary: the runtime-archive dir baked in at compile time as
+        // $<TARGET_FILE_DIR:topo-parallel>. The ancestor-walk below only finds
+        // the archive when `topoBuildExe_` lives inside the build tree (the
+        // unified meta build). In standalone topo-llvm CI `topoBuildExe_` is
+        // the INSTALLED topo-build (topo-cli's prefix), so the walk never
+        // reaches `<build>/topo-llvm/runtime` and `-ltopo-parallel` failed to
+        // resolve — masking the whole `pipeline` benchmark (its only
+        // link_libs consumer) as "Vanilla build failed". The define is
+        // layout-independent and works in both.
+#ifdef TOPO_LLVM_RUNTIME_DIR
+        {
+            fs::path cand = TOPO_LLVM_RUNTIME_DIR;
+            if (fs::exists(cand / parallelArchive)) runtimeDir = cand;
+        }
+#endif
+        if (runtimeDir.empty()) {
+            for (fs::path anc = topoBuildExe_.parent_path();
+                 !anc.empty() && anc != anc.root_path(); anc = anc.parent_path()) {
+                fs::path cand = anc / "topo-llvm" / "runtime";
+                if (fs::exists(cand / parallelArchive)) {
+                    runtimeDir = cand;
+                    break;
+                }
             }
         }
         if (!runtimeDir.empty()) {
@@ -400,7 +417,14 @@ RunResult E2eFixture::vanillaBuild(const std::string& projectName) {
     args.push_back(outputPath.generic_string());
 
     auto r = platform::runProcessCapture(clangxx, args);
-    return RunResult{r.exitCode, r.stdoutOutput};
+    // Merge stderr: clang++ writes its diagnostics (a compile error, a
+    // `cannot find -ltopo-parallel`, an SDK/-isysroot failure) to STDERR, and
+    // the equivalence asserts print `RunResult.output` on a failed vanilla
+    // build. Dropping stderr left "Vanilla build failed:" with an EMPTY body,
+    // making every standalone vanilla-link failure undiagnosable. A vanilla
+    // build's output is never compared (only runBinary's stdout is), so
+    // merging is safe — mirrors topoBuild's stderr handling.
+    return RunResult{r.exitCode, r.stdoutOutput + r.stderrOutput};
 }
 
 // ============================================================================
