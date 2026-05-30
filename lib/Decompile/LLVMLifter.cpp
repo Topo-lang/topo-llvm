@@ -2158,12 +2158,19 @@ bool LLVMLifter::functionHasBoxAllocEvidence(const llvm::Function& func) {
             return false;
         if (name.contains("Weak")) return false;
         if (name.contains("__rust_alloc")) return true;
-        // Box::<T>::new — both manglings carry the `boxed` module path and the
-        // length-prefixed `3new`: legacy `_ZN5alloc5boxed12Box$LT$..$GT$3new`,
+        // Modern `Box::new` lowering: newer rustc emits a free function
+        // `alloc::boxed::box_new` / `box_new_uninit` (mangled `..5boxed14box_new_uninit..`
+        // / `..5boxed7box_new..`) instead of inlining `exchange_malloc` into the
+        // caller. This is what the GHA linux toolchain produces — `make`'s body
+        // holds only the `box_new_uninit` call, so without this the recovery
+        // degraded to `void*` purely on the alloc-helper name.
+        if (name.contains("box_new")) return true;
+        // Legacy / v0 `Box::<T>::new` METHOD — carries the `boxed` module path
+        // and the length-prefixed `3new`: legacy `_ZN5alloc5boxed12Box$LT$..$GT$3new`,
         // v0 `_RNvMNt..5alloc5boxed..3new`. Requiring both keeps this far
         // narrower than a bare `new` and never matches exchange_malloc/free.
         if (name.contains("boxed") && name.contains("3new")) return true;
-        // Match Box::new's documented lowering helper.
+        // Match Box::new's older documented lowering helper.
         if (name.contains("exchange_malloc")) return true;
         return false;
     };
