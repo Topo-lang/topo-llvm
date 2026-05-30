@@ -113,6 +113,12 @@ set_property(TARGET topo-e2e-decompile PROPERTY JOB_POOL_LINK llvm_link)
 include(GoogleTest)
 include(${CMAKE_SOURCE_DIR}/cmake/TopoE2eProjectLocks.cmake)
 
+# The LABELS lists here are mis-parsed by CTest: gtest_discover_tests writes
+# them UNQUOTED into the generated *_tests.cmake (`LABELS e2e functional`),
+# which CTest reads as LABELS=e2e plus a bogus functional=<next> property — so
+# `ctest -L functional` / `-L equivalence` found 0. Each project-locks injector
+# below is given the same LABELS and re-emits them bracket-quoted (the only form
+# CTest parses as a list), which is what actually registers the sub-labels.
 gtest_discover_tests(topo-e2e-functional DISCOVERY_TIMEOUT 30
     PROPERTIES
         LABELS "e2e;functional"
@@ -122,6 +128,7 @@ topo_inject_e2e_project_locks(
     SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/FunctionalTests.cpp"
     FIXTURE Functional
     PREFIX topo_e2e_llvm
+    LABELS "e2e;functional"
     BUILD_CALLS topoBuild topoBaseBuild topoForcedBuild vanillaBuild
 )
 
@@ -134,6 +141,7 @@ topo_inject_e2e_project_locks(
     SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/EquivalenceTests.cpp"
     FIXTURE Equivalence
     PREFIX topo_e2e_llvm
+    LABELS "e2e;equivalence"
     BUILD_CALLS topoBuild topoBaseBuild topoForcedBuild vanillaBuild
                 assertPassFired assertPassNotFired
     ASSERT_CALLS assertBaseEquivalence assertForcedEquivalence assertDefaultEquivalence

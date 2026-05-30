@@ -28,7 +28,7 @@
 # gtest_discover_tests via TEST_INCLUDE_FILES.
 
 function(topo_inject_e2e_project_locks)
-    cmake_parse_arguments(ARG "" "SOURCE;FIXTURE;PREFIX" "BUILD_CALLS;ASSERT_CALLS" ${ARGN})
+    cmake_parse_arguments(ARG "" "SOURCE;FIXTURE;PREFIX" "BUILD_CALLS;ASSERT_CALLS;LABELS" ${ARGN})
     foreach(_required IN ITEMS SOURCE FIXTURE PREFIX)
         if(NOT ARG_${_required})
             message(FATAL_ERROR "topo_inject_e2e_project_locks: ${_required} is required")
@@ -188,7 +188,19 @@ macro(_topo_finalise_test_entry)
     set(_test_name "${ARG_FIXTURE}.${_cur_name}")
     if(NOT "${_test_name}" IN_LIST _seen_names)
         list(APPEND _seen_names "${_test_name}")
-        list(APPEND _entries
-            "set_tests_properties([=[${_test_name}]=] PROPERTIES RESOURCE_LOCK [=[${_lock}]=])")
+        # Re-emit LABELS (bracket-quoted) alongside the lock when the caller
+        # passes LABELS. gtest_discover_tests writes a multi-value LABELS list
+        # UNQUOTED into the generated *_tests.cmake, which CTest mis-parses as
+        # LABELS=<first> plus bogus <second>=<third> properties — so only the
+        # first label ("e2e") ever registers and `ctest -L equivalence` finds
+        # nothing. Setting LABELS here with [=[...]=] quoting registers the full
+        # semicolon list. (Same technique as TopoBenchCategoryLabels.cmake.)
+        if(ARG_LABELS)
+            list(APPEND _entries
+                "set_tests_properties([=[${_test_name}]=] PROPERTIES RESOURCE_LOCK [=[${_lock}]=] LABELS [=[${ARG_LABELS}]=])")
+        else()
+            list(APPEND _entries
+                "set_tests_properties([=[${_test_name}]=] PROPERTIES RESOURCE_LOCK [=[${_lock}]=])")
+        endif()
     endif()
 endmacro()
