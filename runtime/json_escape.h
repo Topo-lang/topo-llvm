@@ -2,7 +2,7 @@
 //
 // Provides a single inline JSON-string escaper used by every NDJSON
 // emitter in this directory (topo_pass_event.cpp, topo_observe.cpp).
-// Audit finding topo-llvm-pass-event-observe-json-unescaped: previously
+// JSON-escaping fix: previously
 // each emitter passed raw `%s` strings straight into fprintf, so any
 // user-controlled name (pipeline / function / lifetime-scope) containing
 // `"`, `\`, or a control character produced a malformed NDJSON line that

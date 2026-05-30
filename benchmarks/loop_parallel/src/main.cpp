@@ -14,9 +14,9 @@ static float data_b[N];
 
 // Private per-function buffers so `scale` and `negate` are truly independent
 // siblings — matches the .topo declaration that they both feed `sum` with no
-// ordering constraint. See issue
-// loop-parallel-forced-mode-breaks-semantics.md for why sharing `data_a`
-// between them violated the declaration under forced parallelization.
+// ordering constraint. Sharing `data_a` between them violated that
+// declaration under forced parallelization (the two would race on the same
+// buffer), so each gets its own buffer.
 static float data_scale[N];
 static float data_negate[N];
 

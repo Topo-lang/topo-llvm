@@ -433,8 +433,7 @@ TEST_F(AdaptiveMonitorTest, StatsSnapshotDuringActiveMonitoring) {
     EXPECT_GT(snapshots.load(), 0u);
 }
 
-// Regression for the JSON-escape audit finding
-// topo-llvm-pass-event-observe-json-unescaped: emitRecord previously
+// Regression for the JSON-escape fix: emitRecord previously
 // wrote `pass`, `from`, `to`, `subject` into the NDJSON line via raw
 // `%s`, so any user-controlled name (pipeline / lifetime-scope)
 // containing `"`, `\`, or a control char broke topo-profile's

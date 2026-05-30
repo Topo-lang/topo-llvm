@@ -46,8 +46,8 @@ static std::unique_ptr<TopoFile> parseTopo(const std::string& source, Diagnostic
 // priority) whose defaults match what these tests want, but partial-list
 // initialization triggers `-Wmissing-field-initializers` and lets a future
 // field default to whatever the struct picks. The helper keeps every site
-// in one place — see issue
-// `missing-field-initializer-warnings-in-test-fixtures`.
+// in one place so no partial aggregate-init (which trips
+// -Wmissing-field-initializers) leaks into the fixtures.
 static VisibilityEntry makeVisEntry(std::string qualifiedName, Visibility vis) {
     VisibilityEntry e;
     e.qualifiedName = std::move(qualifiedName);

@@ -569,7 +569,7 @@ TEST_F(ParallelRuntimeTest, MixedPrioritiesAllComplete) {
     }
 }
 
-// ---- Exception-safety regression (topo-llvm-task-exception-deadlocks-await) ----
+// ---- Exception-safety regression (throwing task body must not deadlock awaiters) ----
 //
 // Prior to the fix, a task body that threw left ``done`` at false
 // forever; the awaiter spun in its work-helping loop until the process

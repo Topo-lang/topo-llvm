@@ -752,8 +752,7 @@ CATEGORY_BENCH_TEST_F(ENHANCE, PassBench, Pipeline_Unfriendly) {
 // PB8: Parallel (10_parallel_runtime)
 // ---------------------------------------------------------------------------
 
-// Uses topo::parallel — TopoParallelPass (COVERED, see issue
-// `topo-passes-violate-no-judgment-principle`). Parallel speedup depends on
+// Uses topo::parallel — TopoParallelPass (COVERED). Parallel speedup depends on
 // task grain × hardware cores × task structure; Topo cannot promise
 // `forced/base ≤ 0.90` on arbitrary friendly workloads. This benchmark is a
 // runtime-API baseline — Pass fires zero candidates here regardless of mode;
@@ -936,11 +935,11 @@ CATEGORY_BENCH_TEST_F(ENHANCE, PassBench, MixedLang_Unfriendly) {
 //
 // Thresholds are 1.05 (non-regression band), slightly looser than the 1.03
 // used on the originals — the split changes noise profile, and first-run
-// tuning to 1.03 (if appropriate) is a followup. Source issues:
-//   - ownership-g-escape-artifact-breaks-eo.md (archived)
-//   - parallel-llvm-mixed-binary-confounds-auto.md (archived)
-//   - lifetime-llvm-mixed-binary-confounds-auto.md (archived)
-//   - class-template-benchmark-heterogeneous.md (archived)
+// tuning to 1.03 (if appropriate) is a followup. Motivating problems:
+//   - ownership: a g-escape artifact was breaking escape-only enforcement
+//   - parallel:  a mixed LLVM friendly/unfriendly binary confounded auto mode
+//   - lifetime:  a mixed LLVM friendly/unfriendly binary confounded auto mode
+//   - class_template: the benchmark mixed heterogeneous workloads in one binary
 // ---------------------------------------------------------------------------
 
 // --- ownership split (was PB15): plain C++, vanilla O2 possible ---

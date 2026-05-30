@@ -125,8 +125,7 @@ TEST(JITRealPathTest, SpecializeBytesWithCorruptedBitcodeFailsCleanly) {
     EXPECT_EQ(ptr, nullptr);
 }
 
-// Regression for the specialize_bytes pointer-lifetime audit finding
-// (topo-llvm-specialize-bytes-pointer-lifetime): the original lambda
+// Regression for the specialize_bytes pointer-lifetime fix: the original lambda
 // captured the caller's `const void* irBytes` by raw value, so any
 // caller that stored the future and freed the bytes before .get() had
 // a latent use-after-free. The implementation now COPIES the bytes

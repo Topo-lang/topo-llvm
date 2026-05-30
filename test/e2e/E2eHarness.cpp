@@ -1377,7 +1377,7 @@ bool belowAbsFloor(double us, const char* passName, const char* label) {
     if (us < kAbsTimeFloorUs) {
         std::printf(
             "[  SKIP  ]   %s %s: absolute time %.0f us below 10ms floor "
-            "(§4 rule 3) — threshold check skipped\n",
+            "(below-floor benchmark-contract rule) — threshold check skipped\n",
             passName, label, us);
         std::fflush(stdout);
         return true;
@@ -1393,7 +1393,8 @@ Verdict demoteIfCapHit(Verdict v, const BenchStats& a, const BenchStats& b,
     if (!a.resampleCapHit && !b.resampleCapHit) return v;
     std::printf(
         "%s[ WARN   ]%s   %s %s: resample cap hit (CV>0.05 after 10 runs) "
-        "— signal unreliable; ERROR demoted to WARN per §4 rule 4\n",
+        "— signal unreliable; ERROR demoted to WARN per the resample-cap "
+        "benchmark-contract rule\n",
         kAnsiYellow, kAnsiReset, passName, label);
     ::testing::Test::RecordProperty("warn",
                                     std::string(passName) + " " + label +
@@ -1415,7 +1416,7 @@ void enforceAutoBaseHardRule(const BenchStats& base, const BenchStats& autoStats
                                    passName, "auto/base (hard rule #1)");
         emitVerdict(v, passName, "auto/base",
                     ratio,
-                    "auto must not be > 1.10× base (§4 absolute rule #1)");
+                    "auto must not be > 1.10× base (absolute benchmark-contract rule #1)");
     }
 }
 
@@ -1476,7 +1477,7 @@ void assertOptCategoryContract(const BenchStats& vanilla,
             v = demoteIfCapHit(v, base, autoStats, passName, "auto/base");
             if (v == Verdict::Pass) emitPass(passName, "auto/base", r);
             else emitVerdict(v, passName, "auto/base", r,
-                             "friendly auto must be ≤ 0.95× base (§4)");
+                             "friendly auto must be ≤ 0.95× base (benchmark contract)");
         }
     } else {
         // unfriendly: auto/base ∈ [0.95, 1.05]; forced/base > 1.05
@@ -1489,7 +1490,7 @@ void assertOptCategoryContract(const BenchStats& vanilla,
             v = demoteIfCapHit(v, base, autoStats, passName, "auto/base");
             if (v == Verdict::Pass) emitPass(passName, "auto/base", r);
             else emitVerdict(v, passName, "auto/base", r,
-                             "unfriendly auto must stay within ±5% of base (§4)");
+                             "unfriendly auto must stay within ±5% of base (benchmark contract)");
         }
         if (forced.runs > 0 && forced.mean > 0.0) {
             double r = forced.mean / base.mean;
@@ -1500,7 +1501,7 @@ void assertOptCategoryContract(const BenchStats& vanilla,
             v = demoteIfCapHit(v, base, forced, passName, "forced/base");
             if (v == Verdict::Pass) emitPass(passName, "forced/base", r);
             else emitVerdict(v, passName, "forced/base", r,
-                             "unfriendly forced is expected to show cost (§4)");
+                             "unfriendly forced is expected to show cost (benchmark contract)");
         }
     }
 }
@@ -1527,7 +1528,7 @@ void assertEnhanceCategoryContract(const BenchStats& vanilla,
         v = demoteIfCapHit(v, vanilla, s, passName, label);
         if (v == Verdict::Pass) emitPass(passName, label, r);
         else emitVerdict(v, passName, label, r,
-                         "ENHANCE must not regress > 1.05× vanilla (§4)");
+                         "ENHANCE must not regress > 1.05× vanilla (benchmark contract)");
     };
     check(autoStats, "auto/vanilla");
     check(forced, "forced/vanilla");
@@ -1583,7 +1584,7 @@ void assertInstrumentCategoryContract(const BenchStats& vanilla,
         v = demoteIfCapHit(v, vanilla, s, passName, label);
         if (v == Verdict::Pass) emitPass(passName, label, r);
         else emitVerdict(v, passName, label, r,
-                         "INSTRUMENT overhead must stay ≤ 1.10× vanilla (§4)");
+                         "INSTRUMENT overhead must stay ≤ 1.10× vanilla (benchmark contract)");
     };
     check(autoStats, "auto/vanilla");
     check(forced, "forced/vanilla");
@@ -1611,7 +1612,7 @@ void assertRuntimeCategoryContract(const BenchStats& vanilla,
         v = demoteIfCapHit(v, vanilla, s, passName, label);
         if (v == Verdict::Pass) emitPass(passName, label, r);
         else emitVerdict(v, passName, label, r,
-                         "RUNTIME overhead must stay ≤ 1.10× vanilla (§4)");
+                         "RUNTIME overhead must stay ≤ 1.10× vanilla (benchmark contract)");
     };
     check(autoStats, "auto/vanilla");
     check(forced, "forced/vanilla");

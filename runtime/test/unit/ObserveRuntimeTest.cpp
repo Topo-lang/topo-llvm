@@ -410,8 +410,7 @@ TEST_F(ObserveRuntimeTest, VeryLongSpanName) {
     topo_trace_span_end();
 }
 
-// 9. Regression for the JSON-escape audit finding
-// topo-llvm-pass-event-observe-json-unescaped: emitSpan previously did
+// 9. Regression for the JSON-escape fix: emitSpan previously did
 // `fprintf("\"name\":\"%s\"", name)` with no escape, so a span name
 // containing `"`, `\`, or a control char broke topo-profile's
 // one-record-per-line framing. The fix routes name through

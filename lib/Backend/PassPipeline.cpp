@@ -75,8 +75,7 @@ static std::unique_ptr<llvm::TargetMachine> createTargetMachine(llvm::Module& mo
 // via llvm::report_fatal_error / abort, not a return code). The previous
 // `bool` signature implied an error channel that never existed; the
 // function unconditionally returned true and both callers ignored the
-// value. The audit finding renamed
-// (topo-llvm-runstandardpipeline-discards-status) called this out.
+// value, so the discarded status was dropped in favor of void.
 //
 // One real degradation mode lives here and is now surfaced explicitly:
 // createTargetMachine(module) returns nullptr when the module's triple

@@ -108,8 +108,7 @@ std::vector<uint8_t> IREmbed::serializePipelineIR(const llvm::Module& module,
     // Build a hash set keyed by name so the prune walk is O(N) rather
     // than O(N*M). For a project with hundreds of pipeline callees and
     // thousands of module functions the linear scan was a real
-    // scalability cliff (see issue
-    // topo-llvm-ireembed-quadratic-name-match).
+    // scalability cliff (the prior name match was quadratic).
     llvm::StringSet<> keepNames;
     for (auto* orig : funcsToClone) keepNames.insert(orig->getName());
 

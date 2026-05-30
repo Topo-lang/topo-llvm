@@ -262,7 +262,7 @@ std::future<void*> specialize_bytes(const std::string& pipelineName,
                                     const void* irBytes, std::size_t irSize,
                                     const std::string& metaJson,
                                     const Context& ctx) {
-    // Audit finding topo-llvm-specialize-bytes-pointer-lifetime: the
+    // Pointer-lifetime fix: the
     // original lambda captured `irBytes` by value as a raw `const void*`,
     // which silently transferred the buffer-lifetime burden onto the
     // caller — and the public header documented no such contract. Two

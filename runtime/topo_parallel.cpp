@@ -33,7 +33,7 @@ struct topo_task {
     // the exception escape the worker loop (which previously left `done`
     // permanently false and `topo_task_await` spinning forever). The
     // awaiter rethrows the captured exception on the awaiting thread.
-    // Audit issue: topo-llvm-task-exception-deadlocks-await.
+    // Exception-safety fix: keeps a thrown body from deadlocking awaiters.
     std::exception_ptr exception;
 };
 
@@ -177,8 +177,7 @@ struct ThreadPool {
     // Run a task body and *always* flip done+notify, even if the body
     // throws. Capturing the exception_ptr lets the awaiting thread
     // rethrow it (so a failure surfaces as a real error instead of a
-    // silent hang). Audit issue
-    // topo-llvm-task-exception-deadlocks-await: prior to this commit
+    // silent hang). Exception-safety fix: prior to this,
     // an exception escaping work() left done==false forever, so
     // topo_task_await spun in its work-helping loop until the process
     // was killed — turning any unhandled task exception into a DoS on
@@ -250,8 +249,7 @@ struct ThreadPool {
                 // when the task throws. Without that wrapper an
                 // exception escaping work() would unwind out of the
                 // worker thread with done==false, leaving every awaiter
-                // spinning forever (issue
-                // topo-llvm-task-exception-deadlocks-await). The
+                // spinning forever. The
                 // done+notify itself is performed inside the helper
                 // under task->mtx for the same memory-safety reason the
                 // previous inlined version held the lock:
@@ -436,8 +434,7 @@ void topo_task_await(topo_task_t* task) {
     delete task;
     // Rethrow on the awaiting thread. The body threw an exception; the
     // contract of topo_task_await is to surface that to the caller
-    // rather than hide it. Audit issue
-    // topo-llvm-task-exception-deadlocks-await — pre-fix this branch
+    // rather than hide it. Exception-safety fix: pre-fix this branch
     // never existed and the awaiter spun forever.
     if (captured) std::rethrow_exception(captured);
 }
@@ -446,7 +443,7 @@ void topo_task_await_all(topo_task_t** tasks, int count) {
     // If any task body throws, we still drain the remaining tasks (so
     // no work-helping spin loop is left running and no task handle is
     // leaked) and surface the first captured exception to the caller.
-    // Audit issue topo-llvm-task-exception-deadlocks-await: prior to
+    // Exception-safety fix: prior to
     // this change a single throwing task would propagate out mid-loop,
     // leaving siblings undrained and their handles leaked.
     std::exception_ptr first;

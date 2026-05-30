@@ -510,7 +510,7 @@ TEST_F(Equivalence, ReturnSpecializationPass_ForcedMatchesVanilla) {
 
 // --- ClassTemplate → class_template ---
 //
-// NOTE (equivalence-framework-lacks-pass-fired-verification.md):
+// NOTE (equivalence framework cannot verify a pass fired by output alone):
 // class_template.topo declares only types — no `stage<N>`, `access()`,
 // `parallel`, or `pipeline` constructs. No Topo optimization Pass has a
 // target here, so every pass is *expected* to be a no-op. The equivalence
@@ -574,8 +574,8 @@ TEST_F(Equivalence, DataLayoutPass_ForcedMatchesVanilla) {
     assertForcedEquivalence(this, "data_layout", "data_layout_forced");
     // Forced config runs runForceSoA on every qualifying topo::array —
     // the friendly path inside the benchmark MUST trigger the transform.
-    // See equivalence-framework-lacks-pass-fired-verification.md for why
-    // this guard is necessary even when stdout matches.
+    // A stdout-only equivalence check cannot confirm the transform ran, so
+    // this fired-marker guard is necessary even when stdout matches.
     assertPassFired("data_layout", "data_layout_forced", "DataLayoutPass");
 }
 
@@ -920,8 +920,8 @@ TEST_F(Equivalence, ObservabilityPass_BaseMatchesForced) {
     // by checking the pre-strip forced output actually contains trace lines.
     ASSERT_GT(countObservabilityTraceLines(forcedRun.output), 0u)
         << "ObservabilityPass forced mode emitted zero trace lines — pass "
-           "did not fire. See issue "
-           "equivalence-stripped-noise-hides-emission-absence.md";
+           "did not fire. Stripping noise from both sides would otherwise "
+           "hide this emission absence and trivially satisfy equivalence.";
     EXPECT_EQ(countObservabilityTraceLines(baseRun.output), 0u)
         << "Base build (pass off) emitted trace lines; instrumentation "
            "leaking into base breaks the equivalence dimension";
