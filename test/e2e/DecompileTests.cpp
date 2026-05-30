@@ -951,6 +951,16 @@ TEST_F(DecompileTest, BoxOwnershipFromAllocDeallocPair) {
         // Itanium-mangled: starts with `_ZN4make4make` (length-prefixed
         // path 4-"make" 4-"make").
         if (q.rfind("_ZN4make4make", 0) == 0) return true;
+        // rustc v0-mangled: `_RNvC<crate-disambiguator>_4make4make`
+        // (crate-root nested value `make` in crate `make`). Recent rustc
+        // nightlies default to v0 `symbol-mangling-version`, so the same
+        // function emits as v0 instead of legacy Itanium. Match a crate-root
+        // value path (`_RNvC…`) carrying the `4make4make` tail. This excludes
+        // alloc's `_RNvNtCs…_5alloc5boxed14box_new_uninit…_4make` (a
+        // nested-in-module `_RNvNt…` symbol that lacks the `4make4make` tail).
+        if (q.rfind("_RNvC", 0) == 0 &&
+            q.find("4make4make") != std::string::npos)
+            return true;
         // Strip a trailing `::h<hex>` Rust hash if present, then match by
         // tail.
         std::string trimmed = q;
