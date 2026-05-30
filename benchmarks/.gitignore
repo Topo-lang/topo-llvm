@@ -56,6 +56,20 @@
 */mixed_lang
 */priority
 */obfuscation
+*/loop_reduction
+# friendly/unfriendly families (lifetime_*, ownership_*, parallel_*, and any
+# future bench) — durable cross-family wildcards. The `*/` prefix matches the
+# <dir>/<name>_friendly build binary two levels deep, NOT the one-level source
+# dir, so tracked sources under e.g. lifetime_friendly/ stay tracked.
+*/*_friendly
+*/*_unfriendly
+
+# Rust benchmark build output (e.g. mixed_lang/rust_lib/). The crate is a
+# zero-dependency staticlib, so its Cargo.lock pins nothing for
+# reproducibility (lockfiles are worth committing only for crates that have
+# external dependencies) — safe to ignore as build noise.
+*/rust_lib/target/
+*/rust_lib/Cargo.lock
 
 # Diagnostic artifacts that `topo build` / `topo-prof` may emit alongside
 # bench binaries. Same script produces an `.exe` on Windows and an ELF on
