@@ -841,15 +841,31 @@ bool PassPipeline::run(llvm::Module& module,
         if (!func.isDeclaration()) func.removeFnAttr(llvm::Attribute::NoInline);
     }
 
-    // Step 2: Standard LLVM optimization pipeline
-    runStandardPipeline(module, level, mode);
-
-    // Step 3: Custom Topo passes (after standard optimization)
+    // Annotate logical stage call-sites BEFORE the standard inliner runs.
+    // TopoReorderPass attaches `!topo.stage` metadata to stage call
+    // instructions in logic-block functions; nothing downstream consumes that
+    // metadata, so its only observable effect is the
+    // `!topo.fired.TopoReorderPass` guard. runStandardPipeline's inliner —
+    // especially buildThinLTODefaultPipeline in Aggressive mode — inlines the
+    // stage callees into their caller and erases the call-sites, and HOW MANY
+    // survive is inliner-threshold-dependent across host toolchains (1 on
+    // macOS, 0 on the linux CI runner → the fired-marker vanished there).
+    // Running the annotation on the freshly-compiled IR (call-sites still
+    // present, original mangled names still matched in `mapping`) makes the
+    // marker deterministic and is semantically inert (metadata-only, no
+    // physical reorder). TopoLayoutPass stays AFTER optimization: it assigns
+    // functions to per-stage sections and wants the optimized module.
     if (symbols && mapping) {
-        // Run language-level stage analysis once, pass to both passes
         auto stageAnalysis = analysis::analyzeStages(*symbols);
         int nReorder = TopoReorderPass::run(module, stageAnalysis, *mapping);
         markPassFired(module, "TopoReorderPass", static_cast<unsigned>(nReorder));
+    }
+
+    // Step 2: Standard LLVM optimization pipeline
+    runStandardPipeline(module, level, mode);
+
+    // Step 3: Custom Topo passes that require the optimized module
+    if (symbols && mapping) {
         int nLayout = TopoLayoutPass::run(module, *symbols, *mapping);
         markPassFired(module, "TopoLayoutPass", static_cast<unsigned>(nLayout));
     }

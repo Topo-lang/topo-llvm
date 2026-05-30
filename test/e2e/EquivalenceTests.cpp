@@ -412,21 +412,18 @@ TEST_F(Equivalence, TopoInlinePass_ForcedMatchesVanilla) {
 // stage-call sites with `!topo.stage` metadata; it does not physically
 // reorder IR.
 //
-// Base (builder.mode = dev, per-module pipeline) runs LLVM's standard
-// inliner aggressively and erases the stage callees before
-// TopoReorderPass can annotate them — the pass legitimately returns 0.
-// Forced (builder.mode = aggressive, ThinLTO pipeline) keeps the calls
-// externally linkable, so annotations survive.
-//
-// The "pass-fired guard" (protection against the pass being silently
-// removed from the pipeline) is carried by the Forced variant only,
-// because dev-mode inlining eats stage callees before TopoReorderPass
-// runs on the Base variant.
+// PassPipeline runs TopoReorderPass on the freshly-compiled IR, BEFORE the
+// standard LLVM optimization pipeline (the inliner). The call-sites are
+// therefore always present when the pass runs, so the fired-marker is
+// deterministic across builder modes and host toolchains — it no longer
+// depends on whether the dev/aggressive inliner happened to leave a stage
+// callee un-inlined. (Earlier the pass ran post-inline, and the marker count
+// was inliner-threshold-dependent: 1 on macOS, 0 on the linux CI runner.)
 
 TEST_F(Equivalence, TopoReorderPass_BaseMatchesVanilla) {
     assertBaseEquivalence(this, "stages", "stages_base");
-    // No assertPassFired here: dev-mode inliner eats stage callees
-    // before TopoReorderPass runs; Forced variant retains the guard.
+    // Marker guard is carried by the Forced variant below (one guard per
+    // pass is enough); base only checks vanilla equivalence here.
 }
 TEST_F(Equivalence, TopoReorderPass_ForcedMatchesVanilla) {
     assertForcedEquivalence(this, "stages", "stages_forced");
