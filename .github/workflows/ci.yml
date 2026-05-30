@@ -507,5 +507,15 @@ jobs:
             ls -la "${RUNNER_TEMP}/topo-install/include" || true
             exit 1
           fi
+      # Put the bundled llvm-dev/bin (clang-22, the SAME LLVM linked into the
+      # backend tools) ahead of the runner's system clang-18 on PATH. The
+      # backend tools now resolve their own bundled clang directly (the
+      # resolveBundledClangxx fix), so this is defence-in-depth: it guarantees
+      # the IR producer and the link-step reader share a major version even if
+      # a build path ever falls back to a bare `clang++` lookup. Without it the
+      # link reads LLVM-22 IR with system clang-18 → `Unknown attribute kind` /
+      # `linking failed`. See issue topo-llvm-e2e-link-llvm-version-skew.
       - name: Test (e2e equivalence + pass-fired; timing excluded)
-        run: ctest --test-dir build -L e2e --label-exclude "perf|benchmark" --output-on-failure --timeout 300
+        run: |
+          export PATH="${{ github.workspace }}/llvm-dev/bin:${PATH}"
+          ctest --test-dir build -L e2e --label-exclude "perf|benchmark" --output-on-failure --timeout 300
