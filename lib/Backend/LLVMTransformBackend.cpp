@@ -7,10 +7,12 @@
 #include "topo/Transforms/PassFiredMarker.h"
 #include "topo/Transforms/SymbolObfuscator.h"
 
+#include <llvm/Bitcode/BitcodeWriter.h>
 #include <llvm/Demangle/Demangle.h>
 #include <llvm/IR/Module.h>
 #include <llvm/IRReader/IRReader.h>
 #include <llvm/Linker/Linker.h>
+#include <llvm/Support/FileSystem.h>
 #include <llvm/Support/SourceMgr.h>
 #include <llvm/Support/raw_ostream.h>
 
@@ -196,28 +198,51 @@ check::PostTransformResult LLVMTransformBackend::postTransformVerify(
 }
 
 std::string LLVMTransformBackend::writeIR(const std::string& outputDir) {
-    std::string path = (fs::path(outputDir) / "optimized.ll").string();
-    std::error_code ec;
-    llvm::raw_fd_ostream irOut(path, ec);
-    if (ec) {
-        std::cerr << "error: cannot write IR: " << ec.message() << "\n";
-        return "";
-    }
-    // Emit debug info in the stable intrinsic form (`call void
-    // @llvm.dbg.value(...)`) rather than LLVM's newer debug-record syntax
-    // (`#dbg_value(...)`). This textual IR is re-parsed by the bundled
-    // clang at the link step (CppDriver::linkCpp); the LLVM 22 prebuilt's
-    // IR reader rejects `#dbg_value` with "expected instruction opcode",
-    // failing the link on a standalone build (the macOS meta build happened
-    // not to round-trip through this path). Normalising to the intrinsic
-    // form every LLVM version parses keeps the written .ll portable. The
-    // module is not used after this point (linkCpp re-reads the file), and
-    // the conversion leaves the `!topo.fired.<Pass>` named metadata — which
-    // the e2e harness scans — untouched.
+    // Normalise debug info to the stable intrinsic form (`call void
+    // @llvm.dbg.value(...)`) instead of LLVM's newer debug-record form
+    // (`#dbg_value(...)`) before writing either artifact below. Combined with
+    // the bitcode hand-off this maximises backward compatibility with an older
+    // reader. Leaves the `!topo.fired.<Pass>` named metadata (which the e2e
+    // harness scans) untouched.
     module_->convertFromNewDbgValues();
-    module_->print(irOut, nullptr);
-    lastWrittenIRPath_ = path;
-    return path;
+
+    std::error_code ec;
+
+    // Textual .ll — retained for dumpIR() (the e2e harness greps it for
+    // `!topo.fired.<Pass>` markers) and for human inspection. NOT the artifact
+    // handed to the linker.
+    std::string llPath = (fs::path(outputDir) / "optimized.ll").string();
+    {
+        llvm::raw_fd_ostream irOut(llPath, ec);
+        if (ec) {
+            std::cerr << "error: cannot write IR: " << ec.message() << "\n";
+            return "";
+        }
+        module_->print(irOut, nullptr);
+    }
+    lastWrittenIRPath_ = llPath;
+
+    // Bitcode .bc — THIS is what the link step (CppDriver::linkCpp) re-reads to
+    // produce the final binary. We hand off bitcode rather than the textual .ll
+    // because textual IR has no cross-version stability guarantee: when the
+    // libLLVM that printed the IR and the clang binary that re-parses it are
+    // not the identical build — e.g. the bundled linux vs macOS "LLVM 22.1.1"
+    // release assets diverge on the newest syntax (`captures(none)`,
+    // `#dbg_value`) — the reader rejects the writer's .ll with
+    // "expected ... token" and the link fails (85/93 e2e in standalone CI).
+    // LLVM bitcode is the versioned, auto-upgrading interchange format designed
+    // for exactly this writer/reader skew, so the .bc round-trips where the .ll
+    // does not. clang auto-detects the .bc input, so linkCpp needs no change.
+    std::string bcPath = (fs::path(outputDir) / "optimized.bc").string();
+    {
+        llvm::raw_fd_ostream bcOut(bcPath, ec, llvm::sys::fs::OF_None);
+        if (ec) {
+            std::cerr << "error: cannot write bitcode: " << ec.message() << "\n";
+            return "";
+        }
+        llvm::WriteBitcodeToFile(*module_, bcOut);
+    }
+    return bcPath;
 }
 
 bool LLVMTransformBackend::dumpIR(const std::string& dumpPath) {
