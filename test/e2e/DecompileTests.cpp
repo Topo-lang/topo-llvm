@@ -865,6 +865,28 @@ TEST_F(DecompileTest, BoxOwnershipFromAllocDeallocPair) {
     ASSERT_TRUE(fs::exists(bcPath)) << "rustc produced no bitcode at "
                                     << bcPath;
 
+    // Also emit textual IR so that a matcher miss caused by rustc-version
+    // DWARF skew (the recovered return type silently degrading to `void*`)
+    // is self-documenting: the failure message below surfaces the actual Box
+    // DWARF + `make` subprogram lines this toolchain produced.
+    fs::path llPath = tmp / "make.ll";
+    platform::runProcessCapture(
+        rustcPath,
+        {"-Copt-level=0", "-g", "-C", "debuginfo=2", "--emit=llvm-ir",
+         srcPath.string(), "-o", llPath.string()},
+        tmp.string());
+    auto boxDwarf = [&]() -> std::string {
+        std::ifstream f(llPath);
+        if (!f) return "(make.ll unavailable)";
+        std::string line, out;
+        while (std::getline(f, line)) {
+            if (line.find("Box<") != std::string::npos ||
+                line.find("DISubprogram(name: \"make\"") != std::string::npos)
+                out += "    " + line + "\n";
+        }
+        return out.empty() ? "(no Box/DISubprogram lines found)" : out;
+    };
+
     decompile::LLVMLifter lifter;
     SymbolTable metadata;
     auto model = lifter.liftBitcode(bcPath.string(), metadata,
@@ -918,7 +940,9 @@ TEST_F(DecompileTest, BoxOwnershipFromAllocDeallocPair) {
     // Core contract: Box<i32> return -> owned i32.
     EXPECT_EQ(makeFn->returnType.ownership, OwnershipKind::Owned)
         << "expected Owned on Box<i32> return; got "
-        << ownershipKindName(makeFn->returnType.ownership);
+        << ownershipKindName(makeFn->returnType.ownership)
+        << "\nBox DWARF / `make` subprogram this rustc emitted:\n"
+        << boxDwarf();
     EXPECT_EQ(makeFn->returnType.modifier, TypeNode::None)
         << "Owned Box<T> must not also carry the pointer modifier";
 

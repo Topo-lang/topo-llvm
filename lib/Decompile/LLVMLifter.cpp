@@ -2079,7 +2079,13 @@ bool matchOutermostBox(const std::string& n) {
         }
         tokens.push_back(args.substr(start));
     }
-    if (tokens.size() != 2) return false; // strictly <T, Allocator>
+    // rustc's DWARF Box name is usually `Box<T, alloc::alloc::Global>` (two
+    // top-level args), but the args list is rustc-version-dependent: some
+    // toolchains emit just `Box<T>` with the default allocator elided. Accept
+    // 1 OR 2 args. (This skew is exactly what made the linux CI runner's rustc
+    // fall through the strict 2-arg check and lift the `Box<i32>` return as a
+    // bare `void*` — see the Box-ownership e2e.)
+    if (tokens.empty() || tokens.size() > 2) return false;
 
     // Trim whitespace.
     auto trim = [](std::string& s) {
@@ -2087,10 +2093,19 @@ bool matchOutermostBox(const std::string& n) {
         size_t b = s.size(); while (b > a && std::isspace((unsigned char)s[b-1])) --b;
         s = s.substr(a, b - a);
     };
-    trim(tokens[0]);
-    trim(tokens[1]);
-    if (tokens[1] != "alloc::alloc::Global") return false;
+    for (auto& t : tokens) trim(t);
     if (tokens[0].empty()) return false;
+    // With an explicit allocator arg it must be the default Global. Match by
+    // `::Global` suffix (and bare `Global`) so the check tolerates the
+    // qualifier spelling drifting across rustc versions
+    // (`alloc::alloc::Global`, `std::alloc::Global`, `Global`).
+    if (tokens.size() == 2) {
+        const std::string& a = tokens[1];
+        bool isGlobal =
+            a == "Global" ||
+            (a.size() >= 8 && a.compare(a.size() - 8, 8, "::Global") == 0);
+        if (!isGlobal) return false;
+    }
 
     // Reject nested Box<Box<...>> (out of MVP scope).
     if (tokens[0].rfind("alloc::boxed::Box<", 0) == 0) return false;
