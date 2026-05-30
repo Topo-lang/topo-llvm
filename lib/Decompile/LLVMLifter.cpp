@@ -2082,9 +2082,10 @@ bool matchOutermostBox(const std::string& n) {
     // rustc's DWARF Box name is usually `Box<T, alloc::alloc::Global>` (two
     // top-level args), but the args list is rustc-version-dependent: some
     // toolchains emit just `Box<T>` with the default allocator elided. Accept
-    // 1 OR 2 args. (This skew is exactly what made the linux CI runner's rustc
-    // fall through the strict 2-arg check and lift the `Box<i32>` return as a
-    // bare `void*` — see the Box-ownership e2e.)
+    // 1 OR 2 args for forward-compat across rustc versions. (NB: the linux CI
+    // Box-ownership failure was NOT a name-shape miss — its DWARF was the
+    // standard 2-arg form. The real cause was the IR-side alloc-evidence gate;
+    // see functionHasBoxAllocEvidence's Box::<T>::new branch.)
     if (tokens.empty() || tokens.size() > 2) return false;
 
     // Trim whitespace.
@@ -2133,6 +2134,14 @@ bool LLVMLifter::functionHasBoxAllocEvidence(const llvm::Function& func) {
     //     `_ZN5alloc5alloc15exchange_malloc...`) — the documented Box::new
     //     lowering, the single intermediate we are willing to accept
     //     without crossing into cross-function inference.
+    //   * a direct call to the `Box::<T>::new` constructor itself. rustc's MIR
+    //     inliner is version-dependent: with Box::new inlined (e.g. the macOS
+    //     toolchain) the `exchange_malloc` call lands directly in `func`'s
+    //     body; when it is NOT inlined (e.g. the linux CI rustc) only the
+    //     `Box::new` call remains here and the alloc lives one frame down. The
+    //     constructor call is unambiguous Box-allocation evidence, so accept
+    //     it too — otherwise the recovery silently degrades to `void*` purely
+    //     on an inlining-decision difference.
     //
     // We explicitly reject `__rust_alloc_zeroed`, `__rust_realloc`,
     // anything containing `Arc`/`Rc`/`Weak`, and `__rust_alloc` references
@@ -2149,6 +2158,11 @@ bool LLVMLifter::functionHasBoxAllocEvidence(const llvm::Function& func) {
             return false;
         if (name.contains("Weak")) return false;
         if (name.contains("__rust_alloc")) return true;
+        // Box::<T>::new — both manglings carry the `boxed` module path and the
+        // length-prefixed `3new`: legacy `_ZN5alloc5boxed12Box$LT$..$GT$3new`,
+        // v0 `_RNvMNt..5alloc5boxed..3new`. Requiring both keeps this far
+        // narrower than a bare `new` and never matches exchange_malloc/free.
+        if (name.contains("boxed") && name.contains("3new")) return true;
         // Match Box::new's documented lowering helper.
         if (name.contains("exchange_malloc")) return true;
         return false;

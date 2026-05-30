@@ -878,13 +878,60 @@ TEST_F(DecompileTest, BoxOwnershipFromAllocDeallocPair) {
     auto boxDwarf = [&]() -> std::string {
         std::ifstream f(llPath);
         if (!f) return "(make.ll unavailable)";
-        std::string line, out;
+        std::vector<std::string> lines;
+        std::map<std::string, std::string> md; // "284" -> full metadata line
+        std::string line;
         while (std::getline(f, line)) {
-            if (line.find("Box<") != std::string::npos ||
-                line.find("DISubprogram(name: \"make\"") != std::string::npos)
-                out += "    " + line + "\n";
+            lines.push_back(line);
+            if (line.size() > 1 && line[0] == '!' && line[1] >= '0' && line[1] <= '9') {
+                size_t eq = line.find(" = ");
+                if (eq != std::string::npos) md[line.substr(1, eq - 1)] = line;
+            }
         }
-        return out.empty() ? "(no Box/DISubprogram lines found)" : out;
+        // First `!<digits>` reference appearing at/after `key` in `s`.
+        auto refAfter = [](const std::string& s, const std::string& key) -> std::string {
+            size_t p = s.find(key);
+            if (p == std::string::npos) return "";
+            p = s.find('!', p + key.size());
+            if (p == std::string::npos) return "";
+            std::string id;
+            for (size_t q = p + 1; q < s.size() && s[q] >= '0' && s[q] <= '9'; ++q)
+                id += s[q];
+            return id;
+        };
+        std::string out;
+        // (1) make()'s body: call/invoke targets — inlined alloc vs a Box::new call.
+        bool inMake = false;
+        for (const auto& l : lines) {
+            if (l.rfind("define", 0) == 0 && l.find("make") != std::string::npos) inMake = true;
+            if (inMake) {
+                if (l.find("call ") != std::string::npos ||
+                    l.find("invoke ") != std::string::npos || l.rfind("define", 0) == 0)
+                    out += "    [make-body] " + l + "\n";
+                if (l == "}") inMake = false;
+            }
+        }
+        // (2) Resolve make's return-type chain: DISubprogram -> DISubroutineType
+        //     -> types tuple -> element[0] (the return type dwarfReturnType reads).
+        std::string spId;
+        for (const auto& [id, l] : md)
+            if (l.find("DISubprogram(name: \"make\"") != std::string::npos) { spId = id; break; }
+        if (spId.empty()) return out + "    (no `make` DISubprogram in make.ll)\n";
+        out += "    [sp]    !" + spId + " = " + md[spId] + "\n";
+        std::string subr = refAfter(md[spId], "type:");
+        if (md.count(subr)) {
+            out += "    [subr]  !" + subr + " = " + md[subr] + "\n";
+            std::string tup = refAfter(md[subr], "types:");
+            if (md.count(tup)) {
+                out += "    [types] !" + tup + " = " + md[tup] + "\n";
+                std::string ret = refAfter(md[tup], "!{"); // element[0] = return type
+                if (md.count(ret))
+                    out += "    [ret]   !" + ret + " = " + md[ret] + "\n";
+                else
+                    out += "    [ret]   element[0] = '" + ret + "' (null/non-ref => void return)\n";
+            }
+        }
+        return out;
     };
 
     decompile::LLVMLifter lifter;
