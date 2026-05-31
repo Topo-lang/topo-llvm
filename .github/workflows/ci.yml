@@ -58,7 +58,7 @@ jobs:
         # is gated on EXISTS llvm-dev/bin/clang++).
         os: [ubuntu-24.04, macos-14, windows-2022]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install build deps (linux)
         if: runner.os == 'Linux'
@@ -69,7 +69,7 @@ jobs:
         run: brew install ninja llvm@22
 
       - name: Export GHA cache env (for vcpkg x-gha backend)
-        uses: actions/github-script@v7
+        uses: actions/github-script@v8
         with:
           script: |
             core.exportVariable('ACTIONS_CACHE_URL', process.env.ACTIONS_CACHE_URL || '');
@@ -93,7 +93,7 @@ jobs:
       - name: Cache bundled LLVM
         if: runner.os != 'macOS'
         id: llvm-cache
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: llvm-dev
           key: llvm-dev-${{ steps.llvm-ver.outputs.version }}-${{ matrix.os }}-v1
@@ -104,7 +104,7 @@ jobs:
 
       - name: Cache upstream installs
         id: upstream-cache
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: ${{ runner.temp }}/topo-install
           key: topo-upstream-${{ env.TOPO_CORE_REF }}-${{ env.TOPO_LANG_REF }}-${{ env.TOPO_LANG_CPP_REF }}-${{ matrix.os }}-v3-pic
@@ -201,8 +201,11 @@ jobs:
       # CLI from topo-cli + the deferred benchmark/e2e fixture trees).
       - name: Test
         # Linux: TESTS=ON, runs ~400 unit + integration cases.
-        # Windows: TESTS=OFF, ctest sees no targets — --no-tests=ignore
-        # keeps the step green until the lld-link fix lands.
+        # Windows: TESTS=OFF (lld-link can't expand the imported topo::core::*
+        # response file). ctest sees no targets and --no-tests=ignore keeps the
+        # step green — but 0 tests run means "not covered", NOT "passing". The
+        # ~400 tests + the JIT engine are verified on Linux only until lld-link
+        # is fixed; the README "Windows notes" section documents this gap.
         run: ctest --test-dir build -E "e2e" --output-on-failure --timeout 180 --no-tests=ignore
 
       - name: Install topo-llvm
@@ -304,7 +307,7 @@ jobs:
       TOPO_LANG_RUST_REF: main
       TOPO_CLI_REF: main
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       # ninja + clangd are required. libpython3.11 is also required: the
       # bundled LLVM's liblldb.so (linked into topo-debug when topo-lang-cpp
       # builds with ENABLE_LLVM=ON) has a HARD link-time dependency on
@@ -321,7 +324,7 @@ jobs:
           sudo apt-get install -y -qq libpython3.11
 
       - name: Export GHA cache env (for vcpkg x-gha backend)
-        uses: actions/github-script@v7
+        uses: actions/github-script@v8
         with:
           script: |
             core.exportVariable('ACTIONS_CACHE_URL', process.env.ACTIONS_CACHE_URL || '');
@@ -339,7 +342,7 @@ jobs:
 
       - name: Cache bundled LLVM
         id: llvm-cache
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: llvm-dev
           key: llvm-dev-${{ steps.llvm-ver.outputs.version }}-ubuntu-24.04-bench-v1
