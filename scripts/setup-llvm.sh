@@ -41,6 +41,23 @@ case "$OS" in
         PLATFORM="windows"
         ;;
     Darwin)
+        # macOS: the prebuilt bundled tarball is unverified here and can abort
+        # at link time with `dyld: Symbol not found: __ZdaPv` (a libc++ ABI
+        # mismatch). Prefer Homebrew llvm@<major>, which cmake/llvm-detect.cmake
+        # also picks up preferentially; skip the bundled download when present.
+        if command -v brew >/dev/null 2>&1; then
+            BREW_LLVM=$(brew --prefix "llvm@${MAJOR}" 2>/dev/null)
+            if [ -n "$BREW_LLVM" ] && [ -x "$BREW_LLVM/bin/clang++" ]; then
+                echo "Found Homebrew llvm@${MAJOR} at $BREW_LLVM"
+                echo "Using it instead of the bundled tarball (recommended on macOS);"
+                echo "cmake/llvm-detect.cmake locates it automatically."
+                exit 0
+            fi
+        fi
+        echo "warning: no Homebrew llvm@${MAJOR} found; downloading the bundled" >&2
+        echo "         macOS LLVM tarball, which is UNVERIFIED on macOS and may" >&2
+        echo "         fail at link time with 'dyld: Symbol not found: __ZdaPv'." >&2
+        echo "         Recommended fix if that happens: brew install llvm@${MAJOR}" >&2
         if [ "$ARCH" = "arm64" ]; then
             if [ "$MAJOR" -ge 19 ]; then
                 ARCHIVE="LLVM-${VER}-macOS-ARM64.tar.xz"

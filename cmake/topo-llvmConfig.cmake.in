@@ -32,4 +32,17 @@ find_dependency(LLVM CONFIG)
 
 include("${CMAKE_CURRENT_LIST_DIR}/topo-llvmTargets.cmake")
 
+# Windows ABI guard. The runtime libs (topo-arena et al.) are built with the
+# MSVC ABI (bundled clang / MSVC). A MinGW/GNU consumer compiler cannot resolve
+# their operator new/delete symbols and fails at link time. Warn early — the
+# README "Windows notes" section shows how to pin an ABI-compatible compiler.
+if(WIN32 AND CMAKE_CXX_COMPILER_ID AND NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang|MSVC")
+    message(WARNING
+        "topo-llvm: on Windows the runtime libraries use the MSVC ABI, but the "
+        "consuming compiler is '${CMAKE_CXX_COMPILER_ID}' "
+        "(${CMAKE_CXX_COMPILER}). Linking topo::llvm::* will likely fail with "
+        "unresolved operator new/delete symbols. Use the bundled clang or MSVC "
+        "(see the README 'Windows notes' section).")
+endif()
+
 check_required_components(topo-llvm)

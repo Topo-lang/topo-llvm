@@ -59,10 +59,15 @@ The `llvm-dev/` directory holds a pinned LLVM/Clang dev distribution
 bash scripts/setup-llvm.sh
 ```
 
-Alternatively, install LLVM via Homebrew (`brew install llvm@<major>`);
-`cmake/llvm-detect.cmake` finds it preferentially because Homebrew
-ships a shared `libLLVM.dylib` that drops relink time and per-binary
-size.
+**On macOS, prefer Homebrew** (`brew install llvm@<major>`).
+`cmake/llvm-detect.cmake` finds it preferentially because Homebrew ships a
+shared `libLLVM.dylib` that drops relink time and per-binary size. The
+prebuilt bundled tarball is **not verified on macOS** and can fail at link
+time with `dyld: Symbol not found: __ZdaPv` / `Abort trap: 6` (a libc++ ABI
+mismatch). On macOS `setup-llvm.sh` detects a Homebrew `llvm@<major>` and
+skips the bundled download; if none is found it warns before falling back to
+the unverified tarball. On Linux and Windows the bundled tarball is the
+default path.
 
 ## Build
 
@@ -93,6 +98,34 @@ target_link_libraries(my_app PRIVATE topo::llvm::topo-arena)
 # Or link a pass library (transitively requires LLVM):
 # target_link_libraries(my_app PRIVATE topo::llvm::TopoTransforms)
 ```
+
+### Windows notes
+
+**ABI / compiler requirement.** The installed runtime libraries
+(`topo::llvm::topo-arena` and the others) are built with the **MSVC ABI**
+(bundled clang, or MSVC `cl.exe`). Your consumer build must use an
+ABI-compatible compiler — otherwise the linker reports unresolved
+`operator new` / `operator delete` symbols. If a MinGW/GNU linker sits
+earlier on `PATH`, CMake may select it silently, so pin the bundled clang
+before `find_package`:
+
+```cmake
+set(CMAKE_C_COMPILER   "<llvm-dev>/bin/clang.exe")
+set(CMAKE_CXX_COMPILER "<llvm-dev>/bin/clang++.exe")
+find_package(topo-llvm CONFIG REQUIRED)
+target_link_libraries(my_app PRIVATE topo::llvm::topo-arena)
+```
+
+The installed `topo-llvmConfig.cmake` emits a warning when it is loaded on
+Windows with a non-Clang / non-MSVC compiler.
+
+**Test / JIT coverage.** The unit + integration test suite and the JIT
+engine (`topo-jit-engine`) are **not built on Windows CI** yet: `lld-link`
+cannot expand the response file that references imported `topo::core::*`
+targets. The IR passes, runtime libraries, decompiler, and backend tools do
+build on Windows, but the test suite and JIT path are currently verified on
+Linux only — build and run the tests on Linux until that limitation is
+resolved.
 
 ## License
 
