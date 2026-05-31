@@ -14,6 +14,7 @@
 #include <fstream>
 #include <functional>
 #include <map>
+#include <cctype>
 #include <llvm/Bitcode/BitcodeWriter.h>
 #include <llvm/IR/BasicBlock.h>
 #include <llvm/IR/DerivedTypes.h>
@@ -70,6 +71,37 @@ int auditTryCatch(const std::vector<transpile::StmtPtr>& body) {
         }
     }
     return found;
+}
+
+// Recognizes the user-defined Rust `make` function in a lifted model by its
+// qualifiedName, across rustc symbol-mangling schemes. Shared by the Box
+// ownership tests below so the legacy/v0 recognition logic lives in exactly
+// one place — the v0 branch is the fix for the v0-default-toolchain miss
+// (`make` resolving to nullptr when rustc emits v0 instead of legacy).
+bool isLiftedMakeFunction(const std::string& q) {
+    // Itanium-legacy: `_ZN4make4make` (length-prefixed path 4-"make" 4-"make").
+    if (q.rfind("_ZN4make4make", 0) == 0) return true;
+    // rustc v0: `_RNvC<crate-disambiguator>_4make4make` (crate-root nested
+    // value `make` in crate `make`). Excludes alloc's
+    // `_RNvNtCs…_5alloc5boxed14box_new_uninit…` (`_RNvNt…`, no `4make4make`).
+    if (q.rfind("_RNvC", 0) == 0 &&
+        q.find("4make4make") != std::string::npos)
+        return true;
+    // Demangled forms — strip a trailing `::h<hex>` hash, then tail-match.
+    std::string trimmed = q;
+    auto hashPos = trimmed.rfind("::h");
+    if (hashPos != std::string::npos) {
+        std::string tail = trimmed.substr(hashPos + 3);
+        bool allHex = !tail.empty();
+        for (char c : tail)
+            if (!std::isxdigit((unsigned char)c)) { allHex = false; break; }
+        if (allHex) trimmed = trimmed.substr(0, hashPos);
+    }
+    if (trimmed == "make" || trimmed == "make::make") return true;
+    if (trimmed.size() >= 12 &&
+        trimmed.compare(trimmed.size() - 12, 12, "::make::make") == 0)
+        return true;
+    return false;
 }
 
 } // namespace
@@ -941,47 +973,14 @@ TEST_F(DecompileTest, BoxOwnershipFromAllocDeallocPair) {
     ASSERT_FALSE(model.functions.empty())
         << "liftBitcode produced no functions from rustc-emitted bitcode";
 
-    // Locate the user-defined `make` function. The current LLVMLifter
-    // demangling fast-path only matches symbols listed in the supplied
-    // SymbolTable; with an empty metadata it falls back to the raw
-    // mangled name (e.g. `_ZN4make4make17h...E`). Accept both the
-    // demangled `make::make[::h<hash>]` form and the Itanium-mangled
-    // form so the test stays insensitive to that downstream fix.
-    auto isMakeFunction = [](const std::string& q) {
-        // Itanium-mangled: starts with `_ZN4make4make` (length-prefixed
-        // path 4-"make" 4-"make").
-        if (q.rfind("_ZN4make4make", 0) == 0) return true;
-        // rustc v0-mangled: `_RNvC<crate-disambiguator>_4make4make`
-        // (crate-root nested value `make` in crate `make`). Recent rustc
-        // nightlies default to v0 `symbol-mangling-version`, so the same
-        // function emits as v0 instead of legacy Itanium. Match a crate-root
-        // value path (`_RNvC…`) carrying the `4make4make` tail. This excludes
-        // alloc's `_RNvNtCs…_5alloc5boxed14box_new_uninit…_4make` (a
-        // nested-in-module `_RNvNt…` symbol that lacks the `4make4make` tail).
-        if (q.rfind("_RNvC", 0) == 0 &&
-            q.find("4make4make") != std::string::npos)
-            return true;
-        // Strip a trailing `::h<hex>` Rust hash if present, then match by
-        // tail.
-        std::string trimmed = q;
-        auto hashPos = trimmed.rfind("::h");
-        if (hashPos != std::string::npos) {
-            std::string tail = trimmed.substr(hashPos + 3);
-            bool allHex = !tail.empty();
-            for (char c : tail) {
-                if (!std::isxdigit((unsigned char)c)) { allHex = false; break; }
-            }
-            if (allHex) trimmed = trimmed.substr(0, hashPos);
-        }
-        if (trimmed == "make" || trimmed == "make::make") return true;
-        if (trimmed.size() >= 12 &&
-            trimmed.compare(trimmed.size() - 12, 12, "::make::make") == 0)
-            return true;
-        return false;
-    };
+    // Locate the user-defined `make` function via the shared recognizer
+    // (handles legacy + v0 mangling and the demangled `make::make[::h<hash>]`
+    // forms; see isLiftedMakeFunction). The LLVMLifter demangling fast-path
+    // only matches symbols in the supplied SymbolTable, so with empty
+    // metadata it falls back to the raw mangled name.
     const transpile::TranspileFunction* makeFn = nullptr;
     for (const auto& fn : model.functions) {
-        if (isMakeFunction(fn.qualifiedName)) { makeFn = &fn; break; }
+        if (isLiftedMakeFunction(fn.qualifiedName)) { makeFn = &fn; break; }
     }
     if (!makeFn) {
         // Diagnostic: print every lifted qualifiedName so a failure is
@@ -1022,6 +1021,103 @@ TEST_F(DecompileTest, BoxOwnershipFromAllocDeallocPair) {
                    "DWARF return is *mut u8, not Box<T, Global>";
         }
     }
+
+    std::error_code ec;
+    fs::remove_all(tmp, ec);
+}
+
+// Pins BOTH rustc symbol-mangling schemes (legacy Itanium-style + v0). The
+// recognizer must locate the user `make` regardless of which mangling the
+// toolchain emits. rustc has signalled its default will move legacy -> v0,
+// so a test that only used the toolchain default would silently stop
+// covering legacy (or, on an older toolchain, never cover v0). Forcing each
+// explicitly with -Csymbol-mangling-version keeps both branches of
+// isLiftedMakeFunction exercised on every run, on any toolchain — converting
+// the v0-mangling miss from an environment-dependent latent bug into a
+// deterministic regression guard. The full Box-ownership contract +
+// diagnostics live in BoxOwnershipFromAllocDeallocPair above; this case is
+// the lean both-schemes matrix.
+TEST_F(DecompileTest, BoxOwnershipAcrossManglingSchemes) {
+    namespace fs = std::filesystem;
+
+    auto whichRustc = platform::runProcessCapture(
+        "/bin/sh", {"-c", "command -v rustc"}, fs::current_path().string());
+    if (whichRustc.exitCode != 0 || whichRustc.stdoutOutput.empty()) {
+        GTEST_SKIP() << "rustc not on PATH; skipping Box mangling matrix";
+    }
+    std::string rustcPath = whichRustc.stdoutOutput;
+    while (!rustcPath.empty() &&
+           (rustcPath.back() == '\n' || rustcPath.back() == '\r' ||
+            rustcPath.back() == ' '))
+        rustcPath.pop_back();
+    ASSERT_TRUE(fs::exists(rustcPath))
+        << "rustc resolved to non-existent: " << rustcPath;
+
+    fs::path tmp = fs::temp_directory_path() / "topo_box_ownership_mangling";
+    fs::create_directories(tmp);
+    fs::path srcPath = tmp / "make.rs";
+    {
+        std::ofstream f(srcPath);
+        f << "#![crate_type = \"lib\"]\n"
+             "pub fn make() -> Box<i32> { Box::new(42) }\n";
+    }
+
+    // rustc must actually support the requested mangling version; older
+    // toolchains may not know v0. Skip a scheme this rustc rejects rather
+    // than failing — the other scheme still proves the recognizer branch.
+    int schemesExercised = 0;
+    for (const std::string& mangling : {std::string("legacy"), std::string("v0")}) {
+        fs::path bcPath = tmp / ("make_" + mangling + ".bc");
+        auto r = platform::runProcessCapture(
+            rustcPath,
+            {"-Copt-level=0", "-g", "-C", "debuginfo=2",
+             "-Csymbol-mangling-version=" + mangling,
+             "--emit=llvm-bc", srcPath.string(), "-o", bcPath.string()},
+            tmp.string());
+        if (r.exitCode != 0) {
+            // Unsupported version on this toolchain (e.g. very old rustc) —
+            // record nothing, move on. A genuine compile error on a supported
+            // version would still leave schemesExercised==0 and fail below.
+            std::printf("[  INFO  ]   rustc rejected mangling=%s "
+                        "(skipping that scheme):\n%s\n",
+                        mangling.c_str(), r.stderrOutput.c_str());
+            continue;
+        }
+        ASSERT_TRUE(fs::exists(bcPath))
+            << "rustc (mangling=" << mangling << ") produced no bitcode";
+
+        decompile::LLVMLifter lifter;
+        SymbolTable metadata;
+        auto model = lifter.liftBitcode(bcPath.string(), metadata,
+                                        transpile::DecompileLevel::Structured);
+        ASSERT_FALSE(model.functions.empty())
+            << "liftBitcode produced no functions (mangling=" << mangling << ")";
+
+        const transpile::TranspileFunction* makeFn = nullptr;
+        for (const auto& fn : model.functions)
+            if (isLiftedMakeFunction(fn.qualifiedName)) { makeFn = &fn; break; }
+
+        if (!makeFn) {
+            std::string seen;
+            for (const auto& fn : model.functions)
+                seen += "  " + fn.qualifiedName + "\n";
+            ADD_FAILURE() << "could not locate `make` under mangling="
+                          << mangling << "; lifted qualifiedNames:\n" << seen;
+            continue;
+        }
+
+        // Same owned-i32 Box contract, asserted per scheme.
+        EXPECT_EQ(makeFn->returnType.ownership, OwnershipKind::Owned)
+            << "expected Owned on Box<i32> return (mangling=" << mangling
+            << "); got " << ownershipKindName(makeFn->returnType.ownership);
+        EXPECT_EQ(makeFn->returnType.nameParts, std::vector<std::string>{"i32"})
+            << "expected pointee nameParts == [\"i32\"] (mangling=" << mangling << ")";
+        ++schemesExercised;
+    }
+
+    EXPECT_GE(schemesExercised, 1)
+        << "no mangling scheme was exercised — rustc rejected both legacy "
+           "and v0, or the fixture failed to compile";
 
     std::error_code ec;
     fs::remove_all(tmp, ec);

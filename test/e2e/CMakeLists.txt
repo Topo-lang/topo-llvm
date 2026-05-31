@@ -111,7 +111,15 @@ set_property(TARGET topo-e2e-decompile PROPERTY JOB_POOL_LINK llvm_link)
 # default (label "perf") and decompile is short (~6s); both still share
 # the global topo_e2e_build lock with everyone except split entries.
 include(GoogleTest)
-include(${CMAKE_SOURCE_DIR}/cmake/TopoE2eProjectLocks.cmake)
+# Resolve the shared e2e cmake helper from THIS package's own cmake/ dir.
+# Use PROJECT_SOURCE_DIR (the topo-llvm project root — topo-llvm calls
+# project()), NOT CMAKE_SOURCE_DIR: when topo-llvm is configured as a
+# subdirectory of a larger super-project build, CMAKE_SOURCE_DIR is the
+# super-project root and would resolve a different copy of the helper than a
+# standalone build does — a silent, build-mode-dependent swap of which file
+# backs the suite. PROJECT_SOURCE_DIR backs it with this package's own
+# topo-llvm/cmake/TopoE2eProjectLocks.cmake in both layouts.
+include(${PROJECT_SOURCE_DIR}/cmake/TopoE2eProjectLocks.cmake)
 
 # The LABELS lists here are mis-parsed by CTest: gtest_discover_tests writes
 # them UNQUOTED into the generated *_tests.cmake (`LABELS e2e functional`),
@@ -193,7 +201,10 @@ gtest_discover_tests(topo-e2e-pass-bench DISCOVERY_TIMEOUT 30
 # Append per-case category labels (opt / covered / instrument / enhance /
 # runtime). Parses CATEGORY_BENCH_TEST_F(...) invocations at configure time
 # and writes a CMake fragment that CTest loads after gtest_discover_tests.
-include(${CMAKE_SOURCE_DIR}/cmake/TopoBenchCategoryLabels.cmake)
+# PROJECT_SOURCE_DIR (this package's own cmake/ copy), not CMAKE_SOURCE_DIR —
+# see the TopoE2eProjectLocks include above for why mode-independent resolution
+# matters when topo-llvm is configured inside a larger super-project build.
+include(${PROJECT_SOURCE_DIR}/cmake/TopoBenchCategoryLabels.cmake)
 topo_inject_bench_category_labels(${CMAKE_CURRENT_SOURCE_DIR}/PassBenchmarkTests.cpp)
 
 # ClassTemplate micros expand via TOPO_CLASS_TEMPLATE_MICRO — the
