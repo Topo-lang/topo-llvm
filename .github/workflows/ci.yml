@@ -539,3 +539,49 @@ jobs:
         run: |
           export PATH="${{ github.workspace }}/llvm-dev/bin:${PATH}"
           ctest --test-dir build -L e2e --label-exclude "perf|benchmark" --output-on-failure --timeout 300
+
+  # ── macOS bundled-clang probe (experimental) ──────────
+  # The supported macOS source path is Homebrew llvm@22 (build-and-test uses it).
+  # The bundled tarball path is unverified and documented to abort at
+  # cmake's compiler check with `dyld: Symbol not found: __ZdaPv` (libc++ ABI).
+  # This probe does NOT install llvm@22, so setup-llvm.sh downloads the bundled
+  # tarball, then tests the crux directly: can the bundled clang launch and
+  # compile+link+RUN a tiny operator new[]/delete[] program with the libc++
+  # workarounds (system-SDK libc++ headers + bundled libc++ on DYLD/rpath)?
+  # If this aborts, the bundled-macOS path is a genuine wall (→ tradeoff); if it
+  # passes, the full bundled pipeline is worth wiring.
+  macos-bundled-clang-probe:
+    name: macos bundled-clang probe (experimental)
+    runs-on: macos-14
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v5
+      - run: brew install ninja
+      - name: Read LLVM version
+        id: llvm-ver
+        run: echo "version=$(tr -d '[:space:]' < .llvm-version)" >> "$GITHUB_OUTPUT"
+      - name: Download bundled LLVM (no brew llvm@major → bundled tarball)
+        run: bash scripts/setup-llvm.sh
+      - name: Probe bundled clang (launch + new[]/delete[] run)
+        run: |
+          BC="${{ github.workspace }}/llvm-dev/bin/clang++"
+          LIB="${{ github.workspace }}/llvm-dev/lib"
+          export DYLD_FALLBACK_LIBRARY_PATH="${LIB}:/usr/lib"
+          echo "::group::clang --version (does the bundled binary even launch?)"
+          "$BC" --version || { echo "FAIL: bundled clang binary aborts on launch"; exit 1; }
+          echo "::endgroup::"
+          SDK=$(xcrun --show-sdk-path)
+          cat > /tmp/probe.cpp <<'CPP'
+          #include <vector>
+          #include <cstdio>
+          int main() { std::vector<int> v{1,2,3}; int* p = new int[4]; p[0]=42; int r=p[0]; delete[] p; std::printf("ok size=%zu val=%d\n", v.size(), r); return 0; }
+          CPP
+          echo "=== compile+link with bundled clang + system-SDK libc++ headers + bundled libc++ ==="
+          "$BC" -std=c++20 -stdlib=libc++ -nostdinc++ -isystem "$SDK/usr/include/c++/v1" \
+                -L "$LIB" -Wl,-rpath,"$LIB" /tmp/probe.cpp -o /tmp/probe \
+            || { echo "FAIL: compile/link with bundled clang failed"; exit 1; }
+          echo "=== run (this is where __ZdaPv would abort) ==="
+          /tmp/probe || { echo "FAIL: bundled-clang binary aborted at runtime (the __ZdaPv class)"; exit 1; }
+          echo "PROBE PASSED: bundled clang usable with the libc++ workarounds"
