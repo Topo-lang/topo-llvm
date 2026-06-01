@@ -297,7 +297,13 @@ jobs:
   # category contracts gate timing regressions (the harness self-demotes a
   # timing ERROR to WARN under high run-to-run variance).
   benchmark:
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    # The deterministic e2e (functional + equivalence + pass-fired) now gates
+    # push + PR too — not just schedule/dispatch. This job runs ONLY the
+    # deterministic labels (Test step: ctest -L e2e --label-exclude
+    # "perf|benchmark"); the wall-clock TIMING benches stay manual/local (see
+    # that step's comment), so the PR gate never pays the 40-90 min timing cost.
+    # No `if:` → runs on every workflow trigger (push to main, PR, dispatch,
+    # and the nightly schedule once added).
     name: benchmark + e2e (linux)
     runs-on: ubuntu-24.04
     defaults:
