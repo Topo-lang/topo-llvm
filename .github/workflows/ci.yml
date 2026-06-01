@@ -578,10 +578,14 @@ jobs:
           #include <cstdio>
           int main() { std::vector<int> v{1,2,3}; int* p = new int[4]; p[0]=42; int r=p[0]; delete[] p; std::printf("ok size=%zu val=%d\n", v.size(), r); return 0; }
           CPP
-          echo "=== compile+link with bundled clang + system-SDK libc++ headers + bundled libc++ ==="
-          "$BC" -std=c++20 -stdlib=libc++ -nostdinc++ -isystem "$SDK/usr/include/c++/v1" \
+          # Internally-consistent bundled toolchain: bundled clang uses its OWN
+          # libc++ headers (no SDK override) + -isysroot for the macOS system C
+          # headers, links the bundled libc++/libc++abi and rpaths llvm-dev/lib.
+          echo "=== compile+link (bundled libc++ headers + bundled libc++ at runtime) ==="
+          "$BC" -std=c++20 -stdlib=libc++ -isysroot "$SDK" \
                 -L "$LIB" -Wl,-rpath,"$LIB" /tmp/probe.cpp -o /tmp/probe \
             || { echo "FAIL: compile/link with bundled clang failed"; exit 1; }
+          echo "=== otool -L (which libc++ does it bind?) ==="; otool -L /tmp/probe || true
           echo "=== run (this is where __ZdaPv would abort) ==="
           /tmp/probe || { echo "FAIL: bundled-clang binary aborted at runtime (the __ZdaPv class)"; exit 1; }
-          echo "PROBE PASSED: bundled clang usable with the libc++ workarounds"
+          echo "PROBE PASSED: bundled clang usable with the internally-consistent libc++ setup"
