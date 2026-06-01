@@ -102,12 +102,28 @@ jobs:
         if: runner.os != 'macOS' && steps.llvm-cache.outputs.cache-hit != 'true'
         run: bash scripts/setup-llvm.sh
 
+      # ABI consistency (Windows): pin the upstream topo-core/-lang/-lang-cpp
+      # builds to the SAME bundled clang topo-llvm uses. Without this the runner's
+      # mingw toolchain (ahead on PATH) builds topo-core into GNU-ABI libTopo*.a
+      # (Itanium mangling), while topo-llvm builds MSVC-ABI .lib — so lld-link
+      # can't resolve topo-core's C++ symbols when linking topo-jit-engine.dll /
+      # the test exes (the C-ABI library link worked, which masked it). CC/CXX
+      # are read by every subsequent topo-* cmake configure; vcpkg ports stay on
+      # the x64-windows triplet's MSVC, which is the same ABI as the bundled clang.
+      - name: Pin bundled clang for upstream builds (Windows ABI consistency)
+        if: runner.os == 'Windows'
+        run: |
+          echo "CC=${{ github.workspace }}/llvm-dev/bin/clang.exe" >> "$GITHUB_ENV"
+          echo "CXX=${{ github.workspace }}/llvm-dev/bin/clang++.exe" >> "$GITHUB_ENV"
+
       - name: Cache upstream installs
         id: upstream-cache
         uses: actions/cache@v5
         with:
           path: ${{ runner.temp }}/topo-install
-          key: topo-upstream-${{ env.TOPO_CORE_REF }}-${{ env.TOPO_LANG_REF }}-${{ env.TOPO_LANG_CPP_REF }}-${{ matrix.os }}-v3-pic
+          # v4: upstream rebuilt with the bundled clang on Windows (ABI fix); the
+          # old GNU-ABI .a install must not be reused.
+          key: topo-upstream-${{ env.TOPO_CORE_REF }}-${{ env.TOPO_LANG_REF }}-${{ env.TOPO_LANG_CPP_REF }}-${{ matrix.os }}-v4-abi
 
       - name: Build & install topo-core (zero-LLVM, lang-less)
         if: steps.upstream-cache.outputs.cache-hit != 'true'
