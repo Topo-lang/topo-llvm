@@ -221,6 +221,25 @@ RunResult E2eFixture::topoBaselineBuild(const std::string& projectName) {
 // vanillaBuild
 // ============================================================================
 
+// Standalone/installed layout: a benchmark Topo.toml's stdlib include is a
+// meta-sibling-relative path (../../../topo-lang-cpp/runtime/include) that is
+// absent when topo-lang-cpp is INSTALLED to a prefix rather than a sibling
+// checkout. Add the install-prefix include (baked in from find_path at configure
+// time as TOPO_LANG_CPP_RUNTIME_INCLUDE) so the vanilla compile finds <topo/*.h>
+// without the CI header shim. Guarded on the dir existing → a no-op in the meta
+// build, where the define is empty (topo-lang-cpp is a real sibling).
+static void appendStdlibPrefixInclude(std::vector<std::string>& args) {
+#ifdef TOPO_LANG_CPP_RUNTIME_INCLUDE
+    fs::path inc = TOPO_LANG_CPP_RUNTIME_INCLUDE;
+    std::error_code ec;
+    if (!inc.empty() && fs::is_directory(inc, ec)) {
+        args.push_back("-I" + inc.generic_string());
+    }
+#else
+    (void)args;
+#endif
+}
+
 RunResult E2eFixture::vanillaBuild(const std::string& projectName) {
     auto config = parseTopoToml(projectName);
     fs::path projDir = projectsDir_ / projectName;
@@ -263,6 +282,7 @@ RunResult E2eFixture::vanillaBuild(const std::string& projectName) {
         }
         args.push_back("-I" + incPath.generic_string());
     }
+    appendStdlibPrefixInclude(args);
 
     // Expand source globs
     for (const auto& srcPattern : config.sources) {
@@ -489,6 +509,7 @@ RunResult E2eFixture::vanillaSharedBuild(const std::string& projectName, const s
             }
             args.push_back("-I" + incPath.generic_string());
         }
+        appendStdlibPrefixInclude(args);
 
         // Extra defines
         for (const auto& def : extraDefines) {

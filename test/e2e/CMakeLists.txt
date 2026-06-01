@@ -15,6 +15,14 @@ target_link_libraries(E2eHarnessLlvm PUBLIC topo::core::TopoPlatform GTest::gtes
 target_include_directories(E2eHarnessLlvm PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}
 )
+# Normalize the find_path cache result (top-level CMakeLists) to a clean empty
+# string when topo-lang-cpp is not installed (meta build, where it is a sibling
+# checkout), rather than the literal "<VAR>-NOTFOUND". Baked in below so the
+# vanilla compile paths can add it as -I in the standalone/installed layout.
+set(_TOPO_E2E_STDLIB_INC "")
+if(TOPO_LANG_CPP_RUNTIME_INCLUDE)
+    set(_TOPO_E2E_STDLIB_INC "${TOPO_LANG_CPP_RUNTIME_INCLUDE}")
+endif()
 target_compile_definitions(E2eHarnessLlvm PUBLIC
     TOPO_BUILD_EXE="$<TARGET_FILE:${TOPO_BUILD_TARGET}>"
     TOPO_BENCHMARKS_DIR="${TOPO_LLVM_BENCHMARKS_DIR}"
@@ -27,6 +35,12 @@ target_compile_definitions(E2eHarnessLlvm PUBLIC
     # so the link resolves regardless of whether topo-build is a build-tree
     # target (meta build) or the installed binary (standalone CI).
     TOPO_LLVM_RUNTIME_DIR="$<TARGET_FILE_DIR:topo-parallel>"
+    # Installed topo-lang-cpp stdlib include dir (<prefix>/include holding
+    # topo/parallel.h), from find_path in the top-level CMakeLists. The vanilla
+    # compile paths add `-I` here so <topo/*.h> resolves in the standalone CI
+    # layout, where the benchmark Topo.toml's meta-sibling include is absent.
+    # Empty in the meta build → the harness's existence guard adds nothing.
+    TOPO_LANG_CPP_RUNTIME_INCLUDE="${_TOPO_E2E_STDLIB_INC}"
     # Backend-tool dirs — colon-separated (semicolon on Windows). The harness
     # prepends every dir to PATH so the imported topo-build CLI resolves
     # sibling backend tools built in this repo.
