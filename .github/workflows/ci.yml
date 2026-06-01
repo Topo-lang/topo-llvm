@@ -102,28 +102,35 @@ jobs:
         if: runner.os != 'macOS' && steps.llvm-cache.outputs.cache-hit != 'true'
         run: bash scripts/setup-llvm.sh
 
-      # ABI consistency (Windows): pin the upstream topo-core/-lang/-lang-cpp
-      # builds to the SAME bundled clang topo-llvm uses. Without this the runner's
-      # mingw toolchain (ahead on PATH) builds topo-core into GNU-ABI libTopo*.a
-      # (Itanium mangling), while topo-llvm builds MSVC-ABI .lib — so lld-link
-      # can't resolve topo-core's C++ symbols when linking topo-jit-engine.dll /
-      # the test exes (the C-ABI library link worked, which masked it). CC/CXX
-      # are read by every subsequent topo-* cmake configure; vcpkg ports stay on
-      # the x64-windows triplet's MSVC, which is the same ABI as the bundled clang.
-      - name: Pin bundled clang for upstream builds (Windows ABI consistency)
+      # ABI + CRT consistency (Windows): pin the upstream topo-core/-lang/-lang-cpp
+      # builds to the SAME bundled clang AND the SAME static CRT topo-llvm uses.
+      # (1) Without the clang pin, the runner's mingw toolchain (ahead on PATH)
+      #     builds topo-core into GNU-ABI libTopo*.a (Itanium mangling) while
+      #     topo-llvm builds MSVC-ABI .lib — lld-link then can't resolve topo-core
+      #     C++ symbols (the C-ABI library link worked, masking it).
+      # (2) topo-llvm + the bundled LLVM use the static CRT (/MT, libcmt); a
+      #     clang-msvc default build of topo-core is /MD (dynamic), so lld-link
+      #     hits `/failifmismatch RuntimeLibrary`. CMAKE_MSVC_RUNTIME_LIBRARY=
+      #     MultiThreaded forces /MT for the upstream builds to match.
+      # CC/CXX are read by every subsequent topo-* cmake configure; TOPO_WIN_CMAKE
+      # is appended to each (empty off-Windows). vcpkg's nlohmann_json/tomlplusplus
+      # are header-only, so they contribute no CRT of their own.
+      - name: Pin bundled clang + static CRT for upstream builds (Windows)
         if: runner.os == 'Windows'
         run: |
           echo "CC=${{ github.workspace }}/llvm-dev/bin/clang.exe" >> "$GITHUB_ENV"
           echo "CXX=${{ github.workspace }}/llvm-dev/bin/clang++.exe" >> "$GITHUB_ENV"
+          echo "TOPO_WIN_CMAKE=-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded" >> "$GITHUB_ENV"
 
       - name: Cache upstream installs
         id: upstream-cache
         uses: actions/cache@v5
         with:
           path: ${{ runner.temp }}/topo-install
-          # v4: upstream rebuilt with the bundled clang on Windows (ABI fix); the
-          # old GNU-ABI .a install must not be reused.
-          key: topo-upstream-${{ env.TOPO_CORE_REF }}-${{ env.TOPO_LANG_REF }}-${{ env.TOPO_LANG_CPP_REF }}-${{ matrix.os }}-v4-abi
+          # v5: upstream rebuilt with the bundled clang + static CRT on Windows
+          # (ABI + RuntimeLibrary fix); earlier GNU-ABI / dynamic-CRT installs
+          # must not be reused.
+          key: topo-upstream-${{ env.TOPO_CORE_REF }}-${{ env.TOPO_LANG_REF }}-${{ env.TOPO_LANG_CPP_REF }}-${{ matrix.os }}-v5-crt
 
       - name: Build & install topo-core (zero-LLVM, lang-less)
         if: steps.upstream-cache.outputs.cache-hit != 'true'
@@ -136,7 +143,7 @@ jobs:
                 -G Ninja -DCMAKE_BUILD_TYPE=Release \
                 -DCMAKE_INSTALL_PREFIX="${RUNNER_TEMP}/topo-install" \
                 -DCMAKE_TOOLCHAIN_FILE="${VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake" \
-                -DCMAKE_POSITION_INDEPENDENT_CODE=ON
+                -DCMAKE_POSITION_INDEPENDENT_CODE=ON ${TOPO_WIN_CMAKE}
           cmake --build "${RUNNER_TEMP}/topo-core-build" --target install
 
       - name: Build & install topo-lang
@@ -151,7 +158,7 @@ jobs:
                 -DCMAKE_INSTALL_PREFIX="${RUNNER_TEMP}/topo-install" \
                 -DCMAKE_PREFIX_PATH="${RUNNER_TEMP}/topo-install" \
                 -DCMAKE_TOOLCHAIN_FILE="${VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake" \
-                -DCMAKE_POSITION_INDEPENDENT_CODE=ON
+                -DCMAKE_POSITION_INDEPENDENT_CODE=ON ${TOPO_WIN_CMAKE}
           cmake --build "${RUNNER_TEMP}/topo-lang-build" --target install
 
       # Re-install topo-core to flip TOPO_CORE_WITH_LANG ON now that
@@ -183,7 +190,7 @@ jobs:
                 -DCMAKE_INSTALL_PREFIX="${RUNNER_TEMP}/topo-install" \
                 -DCMAKE_PREFIX_PATH="${RUNNER_TEMP}/topo-install" \
                 -DCMAKE_TOOLCHAIN_FILE="${VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake" \
-                -DCMAKE_POSITION_INDEPENDENT_CODE=ON
+                -DCMAKE_POSITION_INDEPENDENT_CODE=ON ${TOPO_WIN_CMAKE}
           cmake --build "${RUNNER_TEMP}/topo-lang-cpp-build" --target install
 
       - name: Configure topo-llvm (core scope, tools=OFF)
