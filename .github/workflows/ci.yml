@@ -217,21 +217,7 @@ jobs:
               $TESTS_FLAG
 
       - name: Build
-        # TEMP: -k 0 (ninja keep-going) so every link is attempted and all .rsp
-        # files generate, surfacing the JIT + test-exe link errors in one run.
-        run: cmake --build build -- -k 0
-
-      # TEMP diagnostic (Windows lld-link undefined topo::core symbols): dump the
-      # link response files so we can see whether the imported topo::core::*
-      # archives reach the link line. Remove once the lld-link fix lands.
-      - name: Dump link response files (diagnostic)
-        if: ${{ always() && runner.os == 'Windows' }}
-        run: |
-          for t in topo-jit-engine topo-llvm-unit-tests topo-llvm-integration-tests; do
-            echo "===== ${t}.rsp ====="
-            f=$(find build -name "${t}.rsp" 2>/dev/null | head -1)
-            if [ -n "$f" ]; then tr ' ' '\n' < "$f" | grep -iE '\.lib|TopoSema|TopoAnalysis|TopoAST|Backend|Transforms' || cat "$f"; else echo "(not found)"; fi
-          done
+        run: cmake --build build
 
       # ~400 unit + integration tests; e2e suite excluded (needs topo-build
       # CLI from topo-cli + the deferred benchmark/e2e fixture trees).
