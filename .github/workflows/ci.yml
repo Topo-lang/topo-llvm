@@ -5,12 +5,14 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
-  # NOTE: a nightly `schedule:` for the benchmark job is intentionally NOT
-  # wired yet — the benchmark artifact pipeline is still being brought up
-  # end-to-end (see the benchmark job; cmake stamp-scope fix landed, the
-  # standalone cpp↔llvm bootstrap link is still being sorted). Re-add
-  # `schedule: - cron: '3 18 * * *'` once the `benchmark` job is green via
-  # manual workflow_dispatch.
+  # Nightly deterministic e2e gate. 18:03 UTC — staggered off topo-jvm's :43
+  # and the meta's :23. The benchmark + e2e (linux) job runs the deterministic
+  # equivalence + pass-fired suite (timing benches stay manual / workflow_dispatch
+  # only — they are 40-90 min and flaky on shared runners), so the nightly is
+  # bounded and not subject to timing-suite hangs. Scheduled runs only ever use
+  # the workflow file on the default branch.
+  schedule:
+    - cron: '3 18 * * *'
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
