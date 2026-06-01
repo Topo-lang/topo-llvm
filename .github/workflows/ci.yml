@@ -173,19 +173,18 @@ jobs:
       - name: Configure topo-llvm (core scope, tools=OFF)
         run: |
           # CI gates per-platform:
-          # - Linux: BUILD_TESTS=ON (--start-group/--end-group wrapper added
-          #   2026-05-28 resolves the TopoTransforms↔TopoBackend cycle for
-          #   GNU ld) and BUILD_JIT_ENGINE=ON (LLVMSupport libzstd.a→-lzstd
-          #   substitution in cmake/llvm-detect.cmake bypasses the non-PIC
-          #   restriction for SHARED targets).
-          # - Windows: still gated OFF — lld-link's response-file expansion
-          #   fails for both targets (separate root cause, separate fix).
-          if [ "$RUNNER_OS" = "Linux" ]; then
-            TESTS_FLAG=-DTOPO_LLVM_BUILD_TESTS=ON
-            JIT_FLAG=-DTOPO_LLVM_BUILD_JIT_ENGINE=ON
-          else
+          # - Linux + Windows: BUILD_TESTS=ON + BUILD_JIT_ENGINE=ON. Linux uses
+          #   the --start-group/--end-group wrapper for the TopoTransforms↔
+          #   TopoBackend cycle; Windows is now ON to exercise (and fix) the
+          #   lld-link path the ~400 tests + JIT engine were never run on.
+          # - macOS: still OFF — bundled-clang test/JIT coverage is tracked
+          #   separately (the macOS toolchain workstream).
+          if [ "$RUNNER_OS" = "macOS" ]; then
             TESTS_FLAG=-DTOPO_LLVM_BUILD_TESTS=OFF
             JIT_FLAG=-DTOPO_LLVM_BUILD_JIT_ENGINE=OFF
+          else
+            TESTS_FLAG=-DTOPO_LLVM_BUILD_TESTS=ON
+            JIT_FLAG=-DTOPO_LLVM_BUILD_JIT_ENGINE=ON
           fi
           cmake -S . -B build -G Ninja \
               -DCMAKE_BUILD_TYPE=Release \
@@ -197,16 +196,19 @@ jobs:
       - name: Build
         run: cmake --build build
 
-      # 400 unit + integration tests; e2e suite excluded (needs topo-build
+      # ~400 unit + integration tests; e2e suite excluded (needs topo-build
       # CLI from topo-cli + the deferred benchmark/e2e fixture trees).
       - name: Test
-        # Linux: TESTS=ON, runs ~400 unit + integration cases.
-        # Windows: TESTS=OFF (lld-link can't expand the imported topo::core::*
-        # response file). ctest sees no targets and --no-tests=ignore keeps the
-        # step green — but 0 tests run means "not covered", NOT "passing". The
-        # ~400 tests + the JIT engine are verified on Linux only until lld-link
-        # is fixed; the README "Windows notes" section documents this gap.
-        run: ctest --test-dir build -E "e2e" --output-on-failure --timeout 180 --no-tests=ignore
+        # Linux + Windows: TESTS=ON → run the ~400 unit + integration cases.
+        # No --no-tests=ignore, so a 0-tests build FAILS (real coverage check).
+        # macOS: TESTS gated OFF (bundled-clang coverage tracked separately) —
+        # explicit skip with a reason, not a silent 0-tests green.
+        run: |
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            echo "macOS: unit/integration tests gated OFF (bundled-clang coverage tracked separately); skipping ctest."
+          else
+            ctest --test-dir build -E "e2e" --output-on-failure --timeout 180
+          fi
 
       - name: Install topo-llvm
         run: cmake --install build --prefix "${RUNNER_TEMP}/llvm-install"
