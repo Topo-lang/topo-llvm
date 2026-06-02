@@ -364,15 +364,19 @@ jobs:
         if: runner.os == 'macOS'
         run: brew install ninja llvm@22
 
-      # Point find_package(LLVM) at brew llvm@22 for the upstream LLVM-scope
-      # builds. topo-llvm itself resolves LLVM via cmake/llvm-detect.cmake (brew
-      # auto-pick when llvm-dev/ is absent), but the upstream topo-lang-cpp /
-      # topo-lang-rust ENABLE_LLVM builds call plain find_package(LLVM) with no
-      # brew fallback — so on macOS (no bundled llvm-dev) they need LLVM_DIR.
-      # Same prefix llvm-detect would pick, so it stays consistent.
-      - name: Point find_package(LLVM) at brew llvm@22 (macos)
+      # Point find_package(LLVM) and find_package(Clang) at brew llvm@22 for the
+      # upstream LLVM-scope builds. topo-llvm itself resolves LLVM via
+      # cmake/llvm-detect.cmake (brew auto-pick when llvm-dev/ is absent), but
+      # the upstream topo-lang-cpp / topo-lang-rust ENABLE_LLVM builds call plain
+      # find_package(LLVM), and topo-llvm's tools build calls find_package(Clang)
+      # — neither has a brew fallback, so on macOS (no bundled llvm-dev) they
+      # need LLVM_DIR / Clang_DIR. Same prefix llvm-detect would pick.
+      - name: Point find_package(LLVM/Clang) at brew llvm@22 (macos)
         if: runner.os == 'macOS'
-        run: echo "LLVM_DIR=$(brew --prefix llvm@22)/lib/cmake/llvm" >> "$GITHUB_ENV"
+        run: |
+          BREW_LLVM="$(brew --prefix llvm@22)"
+          echo "LLVM_DIR=${BREW_LLVM}/lib/cmake/llvm" >> "$GITHUB_ENV"
+          echo "Clang_DIR=${BREW_LLVM}/lib/cmake/clang" >> "$GITHUB_ENV"
 
       - name: Export GHA cache env (for vcpkg x-gha backend)
         uses: actions/github-script@v8
