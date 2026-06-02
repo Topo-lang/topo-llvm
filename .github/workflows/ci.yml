@@ -319,11 +319,23 @@ jobs:
     # that step's comment), so the PR gate never pays the 40-90 min timing cost.
     # No `if:` → runs on every workflow trigger (push to main, PR, dispatch,
     # and the nightly schedule once added).
-    name: benchmark + e2e (linux)
-    runs-on: ubuntu-24.04
+    name: benchmark + e2e (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
     defaults:
       run:
         shell: bash
+    strategy:
+      fail-fast: false
+      matrix:
+        # macos-14 mirrors build-and-test: Homebrew llvm@22 instead of the
+        # bundled tarball (bundled macOS clang aborts with the __ZdaPv libc++
+        # ABI mismatch). The e2e harness + backend tools select clang via
+        # TOPO_LLVM_BINDIR, which cmake/llvm-detect.cmake auto-prefers from brew
+        # llvm@<major> when llvm-dev/ is absent — so the pass-fired IR markers
+        # are produced + read by brew clang. The bundled-LLVM cache/download
+        # steps are skipped on macOS. windows-2022 deferred to a follow-up (the
+        # heavier subprocess/link surface for the full topo-build e2e chain).
+        os: [ubuntu-24.04, macos-14]
     env:
       TOPO_LANG_RUST_REF: main
       TOPO_CLI_REF: main
@@ -336,13 +348,31 @@ jobs:
       # "libpython3.11.so.1.0 ... not found" + undefined refs (_Py_Dealloc …).
       # ubuntu-24.04 (noble) ships 3.12 and has no libpython3.11 in its default
       # repos, so pull it from the deadsnakes PPA. macOS dyld resolves this
-      # automatically (local-only), so this is an ubuntu CI-only step.
-      - run: |
+      # automatically, so libpython3.11 is an ubuntu CI-only need.
+      - name: Install build deps (linux)
+        if: runner.os == 'Linux'
+        run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq ninja-build clangd software-properties-common
           sudo add-apt-repository -y ppa:deadsnakes/ppa
           sudo apt-get update -qq
           sudo apt-get install -y -qq libpython3.11
+
+      # macOS: brew llvm@22 (clang/clangd/lldb), avoiding the bundled tarball's
+      # __ZdaPv libc++ ABI defect — same handling as the build-and-test job.
+      - name: Install build deps (macos)
+        if: runner.os == 'macOS'
+        run: brew install ninja llvm@22
+
+      # Point find_package(LLVM) at brew llvm@22 for the upstream LLVM-scope
+      # builds. topo-llvm itself resolves LLVM via cmake/llvm-detect.cmake (brew
+      # auto-pick when llvm-dev/ is absent), but the upstream topo-lang-cpp /
+      # topo-lang-rust ENABLE_LLVM builds call plain find_package(LLVM) with no
+      # brew fallback — so on macOS (no bundled llvm-dev) they need LLVM_DIR.
+      # Same prefix llvm-detect would pick, so it stays consistent.
+      - name: Point find_package(LLVM) at brew llvm@22 (macos)
+        if: runner.os == 'macOS'
+        run: echo "LLVM_DIR=$(brew --prefix llvm@22)/lib/cmake/llvm" >> "$GITHUB_ENV"
 
       - name: Export GHA cache env (for vcpkg x-gha backend)
         uses: actions/github-script@v8
@@ -362,14 +392,15 @@ jobs:
         run: echo "version=$(tr -d '[:space:]' < .llvm-version)" >> "$GITHUB_OUTPUT"
 
       - name: Cache bundled LLVM
+        if: runner.os != 'macOS'
         id: llvm-cache
         uses: actions/cache@v5
         with:
           path: llvm-dev
-          key: llvm-dev-${{ steps.llvm-ver.outputs.version }}-ubuntu-24.04-bench-v1
+          key: llvm-dev-${{ steps.llvm-ver.outputs.version }}-${{ matrix.os }}-bench-v1
 
       - name: Download bundled LLVM
-        if: steps.llvm-cache.outputs.cache-hit != 'true'
+        if: runner.os != 'macOS' && steps.llvm-cache.outputs.cache-hit != 'true'
         run: bash scripts/setup-llvm.sh
 
       # rustup ships on the runner image; ensure a default toolchain for the
@@ -527,5 +558,11 @@ jobs:
       # `linking failed`.
       - name: Test (e2e equivalence + pass-fired; timing excluded)
         run: |
-          export PATH="${{ github.workspace }}/llvm-dev/bin:${PATH}"
+          # Put the IR producer's clang ahead on PATH (defence-in-depth): brew
+          # llvm@22 on macOS, the bundled llvm-dev/bin (clang-22) elsewhere.
+          if [ "${RUNNER_OS}" = "macOS" ]; then
+            export PATH="$(brew --prefix llvm@22)/bin:${PATH}"
+          else
+            export PATH="${{ github.workspace }}/llvm-dev/bin:${PATH}"
+          fi
           ctest --test-dir build -L e2e --label-exclude "perf|benchmark" --output-on-failure --timeout 300
