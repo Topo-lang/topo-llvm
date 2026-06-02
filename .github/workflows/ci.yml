@@ -195,26 +195,20 @@ jobs:
 
       - name: Configure topo-llvm (core scope, tools=OFF)
         run: |
-          # CI gates per-platform:
-          # - Linux + Windows: BUILD_TESTS=ON + BUILD_JIT_ENGINE=ON. Linux uses
-          #   the --start-group/--end-group wrapper for the TopoTransforms↔
-          #   TopoBackend cycle; Windows is now ON to exercise (and fix) the
-          #   lld-link path the ~400 tests + JIT engine were never run on.
-          # - macOS: still OFF — bundled-clang test/JIT coverage is tracked
-          #   separately (the macOS toolchain workstream).
-          if [ "$RUNNER_OS" = "macOS" ]; then
-            TESTS_FLAG=-DTOPO_LLVM_BUILD_TESTS=OFF
-            JIT_FLAG=-DTOPO_LLVM_BUILD_JIT_ENGINE=OFF
-          else
-            TESTS_FLAG=-DTOPO_LLVM_BUILD_TESTS=ON
-            JIT_FLAG=-DTOPO_LLVM_BUILD_JIT_ENGINE=ON
-          fi
+          # All three platforms: BUILD_TESTS=ON + BUILD_JIT_ENGINE=ON on their
+          # supported LLVM source. Linux/Windows use the bundled LLVM tarball;
+          # macOS uses Homebrew llvm@22 (the bundled-tarball macOS path is
+          # ABI-incompatible — see the bundled-clang probe job below — but the
+          # supported brew path builds + tests the ~400 cases + JIT engine
+          # cleanly, verified 400/400 locally on macos-14 with brew libLLVM
+          # 22.1.x + system libc++). Linux uses the --start-group/--end-group
+          # wrapper for the TopoTransforms↔TopoBackend cycle.
           cmake -S . -B build -G Ninja \
               -DCMAKE_BUILD_TYPE=Release \
               -DCMAKE_PREFIX_PATH="${RUNNER_TEMP}/topo-install;${{ github.workspace }}/llvm-dev" \
               -DCMAKE_TOOLCHAIN_FILE="${VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake" \
-              $JIT_FLAG \
-              $TESTS_FLAG
+              -DTOPO_LLVM_BUILD_JIT_ENGINE=ON \
+              -DTOPO_LLVM_BUILD_TESTS=ON
 
       - name: Build
         run: cmake --build build
@@ -222,16 +216,10 @@ jobs:
       # ~400 unit + integration tests; e2e suite excluded (needs topo-build
       # CLI from topo-cli + the deferred benchmark/e2e fixture trees).
       - name: Test
-        # Linux + Windows: TESTS=ON → run the ~400 unit + integration cases.
-        # No --no-tests=ignore, so a 0-tests build FAILS (real coverage check).
-        # macOS: TESTS gated OFF (bundled-clang coverage tracked separately) —
-        # explicit skip with a reason, not a silent 0-tests green.
-        run: |
-          if [ "$RUNNER_OS" = "macOS" ]; then
-            echo "macOS: unit/integration tests gated OFF (bundled-clang coverage tracked separately); skipping ctest."
-          else
-            ctest --test-dir build -E "e2e" --output-on-failure --timeout 180
-          fi
+        # All three platforms run the ~400 unit + integration cases (incl. the
+        # 14 jit + 14 adaptive JIT-engine cases). No --no-tests=ignore, so a
+        # 0-tests build FAILS (real coverage check) — no silent 0-tests green.
+        run: ctest --test-dir build -E "e2e" --output-on-failure --timeout 180
 
       - name: Install topo-llvm
         run: cmake --install build --prefix "${RUNNER_TEMP}/llvm-install"
