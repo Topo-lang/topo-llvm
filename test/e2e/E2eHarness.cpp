@@ -16,6 +16,19 @@
 
 namespace topo::test::e2e {
 
+namespace {
+// std::filesystem::copy_file(overwrite_existing) is unreliable on MinGW/Windows:
+// it throws EEXIST ("File exists") when the destination already exists instead
+// of overwriting. Remove the destination first, then copy into the now-absent
+// path — portable and equivalent to an overwrite on every platform. Keeps the
+// throwing semantics of the call sites (a genuine copy failure still throws).
+void overwriteCopy(const fs::path& from, const fs::path& to) {
+    std::error_code rmEc;
+    fs::remove(to, rmEc); // ignore "does not exist"
+    fs::copy_file(from, to);
+}
+} // namespace
+
 // ============================================================================
 // SetUp
 // ============================================================================
@@ -148,8 +161,8 @@ RunResult E2eFixture::topoBaseBuild(const std::string& projectName,
     }
 
     // Swap Topo.toml → Topo-base.toml
-    fs::copy_file(topoToml, saved, fs::copy_options::overwrite_existing);
-    fs::copy_file(baseToml, topoToml, fs::copy_options::overwrite_existing);
+    overwriteCopy(topoToml, saved);
+    overwriteCopy(baseToml, topoToml);
 
     // Clean incremental cache
     {
@@ -160,7 +173,7 @@ RunResult E2eFixture::topoBaseBuild(const std::string& projectName,
     auto result = topoBuild(projectName);
 
     // Restore original
-    fs::copy_file(saved, topoToml, fs::copy_options::overwrite_existing);
+    overwriteCopy(saved, topoToml);
     fs::remove(saved);
 
     return result;
@@ -191,8 +204,8 @@ RunResult E2eFixture::topoForcedBuild(const std::string& projectName,
     }
 
     // Swap Topo.toml → Topo-forced.toml
-    fs::copy_file(topoToml, saved, fs::copy_options::overwrite_existing);
-    fs::copy_file(forcedToml, topoToml, fs::copy_options::overwrite_existing);
+    overwriteCopy(topoToml, saved);
+    overwriteCopy(forcedToml, topoToml);
 
     // Clean incremental cache
     {
@@ -203,7 +216,7 @@ RunResult E2eFixture::topoForcedBuild(const std::string& projectName,
     auto result = topoBuild(projectName);
 
     // Restore original
-    fs::copy_file(saved, topoToml, fs::copy_options::overwrite_existing);
+    overwriteCopy(saved, topoToml);
     fs::remove(saved);
 
     return result;

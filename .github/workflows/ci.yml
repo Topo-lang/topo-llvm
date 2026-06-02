@@ -333,9 +333,10 @@ jobs:
         # TOPO_LLVM_BINDIR, which cmake/llvm-detect.cmake auto-prefers from brew
         # llvm@<major> when llvm-dev/ is absent — so the pass-fired IR markers
         # are produced + read by brew clang. The bundled-LLVM cache/download
-        # steps are skipped on macOS. windows-2022 deferred to a follow-up (the
-        # heavier subprocess/link surface for the full topo-build e2e chain).
-        os: [ubuntu-24.04, macos-14]
+        # steps are skipped on macOS. windows-2022 uses the bundled llvm-dev
+        # tarball + the bundled-clang/static-CRT pin (the same recipe the
+        # build-and-test job proves); first windows iterations are blind.
+        os: [ubuntu-24.04, macos-14, windows-2022]
     env:
       TOPO_LANG_RUST_REF: main
       TOPO_CLI_REF: main
@@ -407,6 +408,18 @@ jobs:
         if: runner.os != 'macOS' && steps.llvm-cache.outputs.cache-hit != 'true'
         run: bash scripts/setup-llvm.sh
 
+      # ABI + CRT consistency (Windows): pin the upstream + topo-llvm builds to
+      # the SAME bundled clang AND static CRT topo-llvm uses — same rationale as
+      # the build-and-test job (GNU-ABI mingw vs MSVC-ABI clang link failures;
+      # /MD vs /MT RuntimeLibrary mismatch). CC/CXX are read by every subsequent
+      # cmake configure; TOPO_WIN_CMAKE is appended to each (empty off-Windows).
+      - name: Pin bundled clang + static CRT (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          echo "CC=${{ github.workspace }}/llvm-dev/bin/clang.exe" >> "$GITHUB_ENV"
+          echo "CXX=${{ github.workspace }}/llvm-dev/bin/clang++.exe" >> "$GITHUB_ENV"
+          echo "TOPO_WIN_CMAKE=-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded" >> "$GITHUB_ENV"
+
       # rustup ships on the runner image; ensure a default toolchain for the
       # topo-lang-rust LLVM scope + Rust benchmark variants.
       - run: rustup show >/dev/null 2>&1 || rustup default stable
@@ -419,7 +432,7 @@ jobs:
                 -G Ninja -DCMAKE_BUILD_TYPE=Release \
                 -DCMAKE_INSTALL_PREFIX="${RUNNER_TEMP}/topo-install" \
                 -DCMAKE_TOOLCHAIN_FILE="${VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake" \
-                -DCMAKE_POSITION_INDEPENDENT_CODE=ON
+                -DCMAKE_POSITION_INDEPENDENT_CODE=ON ${TOPO_WIN_CMAKE}
           cmake --build "${RUNNER_TEMP}/topo-core-build" --target install
 
       - name: Build & install topo-lang
@@ -431,7 +444,7 @@ jobs:
                 -DCMAKE_INSTALL_PREFIX="${RUNNER_TEMP}/topo-install" \
                 -DCMAKE_PREFIX_PATH="${RUNNER_TEMP}/topo-install" \
                 -DCMAKE_TOOLCHAIN_FILE="${VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake" \
-                -DCMAKE_POSITION_INDEPENDENT_CODE=ON
+                -DCMAKE_POSITION_INDEPENDENT_CODE=ON ${TOPO_WIN_CMAKE}
           cmake --build "${RUNNER_TEMP}/topo-lang-build" --target install
 
       - name: Re-install topo-core (with-lang)
@@ -453,7 +466,7 @@ jobs:
                 -DCMAKE_INSTALL_PREFIX="${RUNNER_TEMP}/topo-install" \
                 -DCMAKE_PREFIX_PATH="${RUNNER_TEMP}/topo-install" \
                 -DCMAKE_TOOLCHAIN_FILE="${VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake" \
-                -DCMAKE_POSITION_INDEPENDENT_CODE=ON
+                -DCMAKE_POSITION_INDEPENDENT_CODE=ON ${TOPO_WIN_CMAKE}
           cmake --build "${RUNNER_TEMP}/topo-lang-cpp-build" --target install
 
       # topo-llvm CORE from this checkout (tools OFF — they need lang-cpp/-rust
@@ -466,7 +479,7 @@ jobs:
               -DCMAKE_PREFIX_PATH="${RUNNER_TEMP}/topo-install;${{ github.workspace }}/llvm-dev" \
               -DCMAKE_TOOLCHAIN_FILE="${VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake" \
               -DTOPO_LLVM_BUILD_TOOLS=OFF -DTOPO_LLVM_BUILD_TESTS=OFF \
-              -DTOPO_LLVM_BUILD_JIT_ENGINE=ON -DCMAKE_POSITION_INDEPENDENT_CODE=ON
+              -DTOPO_LLVM_BUILD_JIT_ENGINE=ON -DCMAKE_POSITION_INDEPENDENT_CODE=ON ${TOPO_WIN_CMAKE}
           cmake --build "${RUNNER_TEMP}/llvm-core-build" --target install
 
       - name: Build & install topo-lang-cpp (ENABLE_LLVM=ON)
@@ -476,7 +489,7 @@ jobs:
                 -DCMAKE_INSTALL_PREFIX="${RUNNER_TEMP}/topo-install" \
                 -DCMAKE_PREFIX_PATH="${RUNNER_TEMP}/topo-install;${{ github.workspace }}/llvm-dev" \
                 -DCMAKE_TOOLCHAIN_FILE="${VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake" \
-                -DTOPO_LANG_CPP_ENABLE_LLVM=ON -DCMAKE_POSITION_INDEPENDENT_CODE=ON
+                -DTOPO_LANG_CPP_ENABLE_LLVM=ON -DCMAKE_POSITION_INDEPENDENT_CODE=ON ${TOPO_WIN_CMAKE}
           cmake --build "${RUNNER_TEMP}/topo-lang-cpp-llvm-build" --target install
 
       - name: Build & install topo-lang-rust (ENABLE_LLVM=ON)
@@ -488,7 +501,7 @@ jobs:
                 -DCMAKE_INSTALL_PREFIX="${RUNNER_TEMP}/topo-install" \
                 -DCMAKE_PREFIX_PATH="${RUNNER_TEMP}/topo-install;${{ github.workspace }}/llvm-dev" \
                 -DCMAKE_TOOLCHAIN_FILE="${VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake" \
-                -DTOPO_LANG_RUST_ENABLE_LLVM=ON -DCMAKE_POSITION_INDEPENDENT_CODE=ON
+                -DTOPO_LANG_RUST_ENABLE_LLVM=ON -DCMAKE_POSITION_INDEPENDENT_CODE=ON ${TOPO_WIN_CMAKE}
           cmake --build "${RUNNER_TEMP}/topo-lang-rust-build" --target install
 
       # topo-cli provides the `topo-build` executable the benchmark artifact
@@ -503,7 +516,7 @@ jobs:
                 -DCMAKE_INSTALL_PREFIX="${RUNNER_TEMP}/topo-install" \
                 -DCMAKE_PREFIX_PATH="${RUNNER_TEMP}/topo-install;${{ github.workspace }}/llvm-dev" \
                 -DCMAKE_TOOLCHAIN_FILE="${VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake" \
-                -DCMAKE_POSITION_INDEPENDENT_CODE=ON
+                -DCMAKE_POSITION_INDEPENDENT_CODE=ON ${TOPO_WIN_CMAKE}
           cmake --build "${RUNNER_TEMP}/topo-cli-build" --target install
 
       # Reconfigure THIS checkout with tools + benchmarks ON now that lang-cpp/
@@ -515,7 +528,7 @@ jobs:
               -DCMAKE_TOOLCHAIN_FILE="${VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake" \
               -DTOPO_LLVM_BUILD_TOOLS=ON -DTOPO_LLVM_BUILD_BENCHMARKS=ON \
               -DTOPO_LLVM_BUILD_TESTS=ON -DTOPO_LLVM_BUILD_JIT_ENGINE=ON \
-              -DCMAKE_POSITION_INDEPENDENT_CODE=ON
+              -DCMAKE_POSITION_INDEPENDENT_CODE=ON ${TOPO_WIN_CMAKE}
 
       - name: Build
         run: cmake --build build
@@ -530,9 +543,10 @@ jobs:
       # in the standalone bootstrap; this is the robust co-location workaround.)
       - name: Co-locate backend tools next to topo-build
         run: |
-          cp build/tools/topo-build-llvm-cpp/topo-build-llvm-cpp \
-             build/tools/topo-build-llvm-rust/topo-build-llvm-rust \
-             build/tools/topo-build-llvm-mixed/topo-build-llvm-mixed \
+          ext=""; [ "$RUNNER_OS" = "Windows" ] && ext=".exe"
+          cp build/tools/topo-build-llvm-cpp/topo-build-llvm-cpp${ext} \
+             build/tools/topo-build-llvm-rust/topo-build-llvm-rust${ext} \
+             build/tools/topo-build-llvm-mixed/topo-build-llvm-mixed${ext} \
              "${RUNNER_TEMP}/topo-install/bin/"
 
       # Deterministic gate: e2e functional + equivalence + pass-fired, with the
