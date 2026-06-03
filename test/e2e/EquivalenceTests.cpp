@@ -115,18 +115,36 @@ static size_t countPassEventLines(const std::string& output) {
     return count;
 }
 
-// Dump all symbol names from a compiled binary using llvm-nm. Used by the
-// functional symbol-presence tests migrated from PassBenchmarkTests.cpp
-// (benchmark files measure performance only; artifact checks live here).
+// Dump the symbol/artifact view of a build for the functional presence tests
+// (artifact checks migrated from PassBenchmarkTests.cpp).
+//
+// POSIX: read the compiled binary's symbol table via llvm-nm.
+// Windows: a normally-linked PE executable carries NO COFF symbol table (symbols
+// live in the .pdb), so llvm-nm yields nothing. Inspect the pass-produced IR
+// (.ll from --dump-ir) instead — IREmbed's `@topo_embedded_ir` global and the
+// AdaptiveDispatchPass-inserted `@topo_cost_begin` / `@topo_adaptive_register`
+// calls appear there. Confirmed on CI: llvm-nm reports 0 symbols on the .exe
+// while the `.topo_ir` section IS present in the image (the artifact survives to
+// the binary; only the symbol-table view is unavailable on Windows), so the
+// IR-level check preserves the same auto-vs-base guarantee.
 static std::string dumpAllSymbols(E2eFixture* self,
                                   const std::string& project,
                                   const std::string& outputName) {
+#ifdef _WIN32
+    fs::path ir = self->dumpedIRPath(project, outputName);
+    if (ir.empty()) return "";
+    std::ifstream ifs(ir);
+    std::stringstream buf;
+    buf << ifs.rdbuf();
+    return buf.str();
+#else
     fs::path binPath = self->binaryPath(project, outputName);
     if (!fs::exists(binPath)) return "";
     std::string nm = (self->llvmBinDir_ / ("llvm-nm" + std::string(platform::ExeSuffix))).generic_string();
     auto r = platform::runProcessCapture(nm, {"-a", binPath.generic_string()});
     if (r.exitCode != 0) return "";
     return r.stdoutOutput;
+#endif
 }
 
 static bool binaryHasSymbol(E2eFixture* self,
