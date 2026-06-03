@@ -6,6 +6,9 @@
 #include "topo/Parser/Parser.h"
 #include "topo/Sema/SemanticAnalyzer.h"
 
+#include <llvm/BinaryFormat/Dwarf.h>
+#include <llvm/IR/DIBuilder.h>
+#include <llvm/IR/DebugInfoMetadata.h>
 #include <llvm/IR/Function.h>
 #include <llvm/IR/IRBuilder.h>
 #include <llvm/IR/LLVMContext.h>
@@ -84,6 +87,47 @@ static std::unique_ptr<llvm::Module> createModuleWithCalls(llvm::LLVMContext& ct
         b.CreateRetVoid();
     }
 
+    return module;
+}
+
+// Like createModuleWithCalls, but attaches a debug location (with the given
+// source line) to each call. `calleesWithLines` is {mangledName, sourceLine} in
+// EMISSION order. Used to verify stage ordering is checked by SOURCE position,
+// not IR emission order — the latter is ABI-dependent (MSVC evaluates call
+// arguments right-to-left, reordering independent sibling calls in the IR).
+static std::unique_ptr<llvm::Module> createModuleWithCallsAndLocs(
+    llvm::LLVMContext& ctx, const std::string& callerName,
+    const std::vector<std::pair<std::string, unsigned>>& calleesWithLines) {
+    auto module = std::make_unique<llvm::Module>("test_module", ctx);
+    module->addModuleFlag(llvm::Module::Warning, "Debug Info Version", llvm::DEBUG_METADATA_VERSION);
+
+    auto* voidTy = llvm::Type::getVoidTy(ctx);
+    auto* funcTy = llvm::FunctionType::get(voidTy, false);
+
+    llvm::DIBuilder dib(*module);
+    auto* file = dib.createFile("test.cpp", ".");
+    dib.createCompileUnit(llvm::dwarf::DW_LANG_C_plus_plus, file, "topo-test", /*isOptimized=*/false, "", 0);
+    auto* spType = dib.createSubroutineType(dib.getOrCreateTypeArray({}));
+
+    std::vector<llvm::Function*> callees;
+    for (const auto& nl : calleesWithLines) {
+        auto* func = llvm::Function::Create(funcTy, llvm::GlobalValue::ExternalLinkage, nl.first, *module);
+        llvm::IRBuilder<>(llvm::BasicBlock::Create(ctx, "entry", func)).CreateRetVoid();
+        callees.push_back(func);
+    }
+
+    auto* caller = llvm::Function::Create(funcTy, llvm::GlobalValue::ExternalLinkage, callerName, *module);
+    auto* sp = dib.createFunction(file, callerName, callerName, file, 1, spType, 1, llvm::DINode::FlagZero,
+                                  llvm::DISubprogram::SPFlagDefinition);
+    caller->setSubprogram(sp);
+    llvm::IRBuilder<> builder(llvm::BasicBlock::Create(ctx, "entry", caller));
+    for (size_t i = 0; i < callees.size(); ++i) {
+        auto* call = builder.CreateCall(callees[i]);
+        call->setDebugLoc(llvm::DILocation::get(ctx, calleesWithLines[i].second, 1, sp));
+    }
+    builder.CreateRetVoid();
+
+    dib.finalize();
     return module;
 }
 
@@ -617,6 +661,74 @@ TEST(VerifierStageOrder, StageOrderViolated) {
     auto result = verifier.verify(*module, mapping);
 
     EXPECT_GT(result.stageOrderViolations, 0) << "Calling stage-2 before stage-1 should violate ordering";
+}
+
+// --- Stage order is checked by SOURCE position, not IR emission order ---
+// MSVC evaluates call arguments right-to-left, so `sum(scale(), negate())` emits
+// the stage<2> call before the stage<1> call in the IR even though the source
+// lists them in stage order. The verifier must order staged calls by their
+// debug location so this ABI difference is not a false violation.
+
+TEST(VerifierStageOrder, SourceOrderRespectedDespiteEmissionOrder) {
+    llvm::LLVMContext ctx;
+
+    // demo.topo: fn run { stage<1> init(); stage<2> process(); }
+    // Emit process (stage 2) BEFORE init (stage 1) — the MSVC arg-eval order —
+    // but give init the earlier source line. Source order = init, process → OK.
+    auto module = createModuleWithCallsAndLocs(ctx, "_ZN3app3runEv",
+                                               {{"_ZN3app7processEv", 20}, {"_ZN3app4initEv", 10}});
+
+    std::string source = readFile(TOPO_TEST_FIXTURES_DIR "/demo.topo");
+    ASSERT_FALSE(source.empty());
+
+    DiagnosticEngine diag;
+    auto ast = parseTopo(source, diag);
+    ASSERT_FALSE(diag.hasErrors());
+
+    SemanticAnalyzer sema(diag);
+    auto symbols = sema.analyze(static_cast<const TopoFile&>(*ast));
+    ASSERT_FALSE(diag.hasErrors());
+
+    SymbolMapper mapper(ctx);
+    auto mapping = mapper.mapSymbols(*module, VisibilityCollector().collect(static_cast<const TopoFile&>(*ast)));
+
+    DiagnosticEngine verifyDiag;
+    Verifier verifier(verifyDiag, symbols);
+    auto result = verifier.verify(*module, mapping);
+
+    EXPECT_EQ(result.stageOrderViolations, 0)
+        << "init(line10,stage1) precedes process(line20,stage2) in SOURCE order; "
+           "ABI-dependent IR emission order must not produce a violation";
+}
+
+TEST(VerifierStageOrder, SourceOrderViolationDetected) {
+    llvm::LLVMContext ctx;
+
+    // Source order process(line10,stage2) before init(line20,stage1) → violation,
+    // independent of emission order.
+    auto module = createModuleWithCallsAndLocs(ctx, "_ZN3app3runEv",
+                                               {{"_ZN3app4initEv", 20}, {"_ZN3app7processEv", 10}});
+
+    std::string source = readFile(TOPO_TEST_FIXTURES_DIR "/demo.topo");
+    ASSERT_FALSE(source.empty());
+
+    DiagnosticEngine diag;
+    auto ast = parseTopo(source, diag);
+    ASSERT_FALSE(diag.hasErrors());
+
+    SemanticAnalyzer sema(diag);
+    auto symbols = sema.analyze(static_cast<const TopoFile&>(*ast));
+    ASSERT_FALSE(diag.hasErrors());
+
+    SymbolMapper mapper(ctx);
+    auto mapping = mapper.mapSymbols(*module, VisibilityCollector().collect(static_cast<const TopoFile&>(*ast)));
+
+    DiagnosticEngine verifyDiag;
+    Verifier verifier(verifyDiag, symbols);
+    auto result = verifier.verify(*module, mapping);
+
+    EXPECT_GT(result.stageOrderViolations, 0)
+        << "process(line10,stage2) precedes init(line20,stage1) in SOURCE order";
 }
 
 // ===== Issue 005: Pipeline edge verification =====
