@@ -584,20 +584,3 @@ jobs:
             export PATH="${{ github.workspace }}/llvm-dev/bin:${PATH}"
           fi
           ctest --test-dir build -L e2e --label-exclude "perf|benchmark" --output-on-failure --timeout 300
-
-      # TEMP DIAGNOSTIC (RC5): capture the exact IR shape DataLayoutPass sees at
-      # its execution point on windows-2022 (the --dump-ir IR is post-opt and
-      # does not reflect the pass input). Removed once the matcher is fixed.
-      - name: DIAG RC5 — dump DataLayoutPass input shape (windows)
-        if: always() && runner.os == 'Windows'
-        run: |
-          export PATH="${{ github.workspace }}/llvm-dev/bin:${PATH}"
-          export TOPO_DLDBG="${{ github.workspace }}/dldbg.txt"
-          rm -f "$TOPO_DLDBG"
-          # Force a clean forced rebuild so the pass re-runs and writes the dump.
-          rm -rf benchmarks/data_layout/.topo-cache benchmarks/data_layout/*.exe.ll || true
-          ctest --test-dir build -R 'Equivalence\.DataLayoutPass_ForcedMatchesVanilla' \
-                --output-on-failure --timeout 300 || true
-          echo "================= TOPO_DLDBG DUMP ================="
-          cat "$TOPO_DLDBG" 2>/dev/null || echo "(no dump file — runGlobalImpl not reached with a candidate)"
-          echo "================= END DUMP ================="
