@@ -1012,15 +1012,21 @@ E2eFixture::TomlConfig E2eFixture::parseTopoToml(const std::string& projectName)
 
 namespace {
 
-// Locate the .ll file written by `--dump-ir`. topo-build places it at
-// `<outputPath>.ll` — in practice, alongside the compiled binary. Try both
-// project root (where the binary lives for topo-build outputs) and
-// `build/<name>.ll` (where vanillaBuild places its baseline).
+// Locate the .ll file written by `--dump-ir`. topo-build emits the dump at
+// `<outputPath>.ll`, and outputPath carries the platform executable suffix
+// (topo-build's autoExtension appends ExeSuffix), so on Windows the dump is
+// `<name>.exe.ll`, not `<name>.ll`. Probe the suffixed and bare names in both
+// the project root (topo-build output) and `build/` (vanillaBuild baseline).
 fs::path findDumpedIR(const fs::path& projectDir, const std::string& outputName) {
-    fs::path root = projectDir / (outputName + ".ll");
-    if (fs::exists(root)) return root;
-    fs::path inBuild = projectDir / "build" / (outputName + ".ll");
-    if (fs::exists(inBuild)) return inBuild;
+    const std::string exe(platform::ExeSuffix); // "" on POSIX, ".exe" on Windows
+    std::vector<std::string> names = {outputName + ".ll"};
+    if (!exe.empty()) names.push_back(outputName + exe + ".ll");
+    for (const auto& dir : {projectDir, projectDir / "build"}) {
+        for (const auto& name : names) {
+            fs::path p = dir / name;
+            if (fs::exists(p)) return p;
+        }
+    }
     return {};
 }
 
@@ -1094,6 +1100,11 @@ std::set<std::string> E2eFixture::collectPassFiredMarkers(const std::string& pro
     std::set<std::string> names;
     for (const auto& m : markers) names.insert(m.passName);
     return names;
+}
+
+fs::path E2eFixture::dumpedIRPath(const std::string& projectName,
+                                  const std::string& outputName) {
+    return findDumpedIR(projectsDir_ / projectName, outputName);
 }
 
 unsigned E2eFixture::getPassFiredCount(const std::string& projectName,

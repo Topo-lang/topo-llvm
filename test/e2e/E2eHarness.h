@@ -283,6 +283,10 @@ public:
     // Get the full path to a binary (with platform suffix).
     fs::path binaryPath(const std::string& projectName, const std::string& outputName);
 
+    // Resolve the --dump-ir .ll for a build (handles the platform exe suffix:
+    // on Windows the dump lands at <name>.exe.ll). Empty if not found.
+    fs::path dumpedIRPath(const std::string& projectName, const std::string& outputName);
+
     // Get the full path to a shared library (with platform suffix).
     fs::path sharedLibPath(const std::string& projectName, const std::string& outputName);
 

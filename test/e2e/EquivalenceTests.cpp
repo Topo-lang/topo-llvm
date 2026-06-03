@@ -1330,8 +1330,8 @@ TEST_F(Equivalence, ContainmentInterceptionPass_ForcedInjectsViolationCalls) {
     // Additionally assert the runtime call symbol appears in the forced IR,
     // confirming the pass injected real instrumentation rather than only
     // emitting a metadata marker.
-    fs::path irPath = projectsDir_ / "class_template" / "class_template_forced.ll";
-    ASSERT_TRUE(fs::exists(irPath))
+    fs::path irPath = dumpedIRPath("class_template", "class_template_forced");
+    ASSERT_TRUE(!irPath.empty() && fs::exists(irPath))
         << "class_template_forced.ll not found — was the forced variant built?";
     std::ifstream ifs(irPath);
     std::stringstream buf;
