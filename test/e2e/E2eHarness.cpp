@@ -65,19 +65,26 @@ void E2eFixture::SetUp() {
     //   (1) sibling lookup next to argv[0]
     //   (2) PATH search
     // Inject the backend-tool build dirs into PATH so the subprocess find
-    // succeeds. TOPO_BUILD_LLVM_TOOLS_DIRS is a delimited list set at
-    // compile time by the e2e CMakeLists via $<TARGET_FILE_DIR:...>.
-#ifdef TOPO_BUILD_LLVM_TOOLS_DIRS
+    // succeeds. The dirs are provided as separate single-path macros (set at
+    // compile time by the e2e CMakeLists via $<TARGET_FILE_DIR:...>) and joined
+    // here with the platform PATH separator — a single delimited macro can't
+    // carry a ';' through CMake's compile-definition list (see CMakeLists).
+#if defined(TOPO_BUILD_LLVM_TOOLS_DIR_CPP)
     {
-        const std::string toolsDirs = TOPO_BUILD_LLVM_TOOLS_DIRS;
+#ifdef _WIN32
+        const char sep = ';';
+#else
+        const char sep = ':';
+#endif
+        std::string toolsDirs = TOPO_BUILD_LLVM_TOOLS_DIR_CPP;
+        toolsDirs += sep;
+        toolsDirs += TOPO_BUILD_LLVM_TOOLS_DIR_RUST;
+        toolsDirs += sep;
+        toolsDirs += TOPO_BUILD_LLVM_TOOLS_DIR_MIXED;
         const char* oldPath = std::getenv("PATH");
         std::string newPath = toolsDirs;
         if (oldPath && *oldPath) {
-#ifdef _WIN32
-            newPath += ";";
-#else
-            newPath += ":";
-#endif
+            newPath += sep;
             newPath += oldPath;
         }
 #ifdef _WIN32
