@@ -5,7 +5,11 @@
 #include <llvm/IR/Constants.h>
 #include <llvm/IR/IRBuilder.h>
 #include <llvm/IR/Instructions.h>
+#include <llvm/Support/FileSystem.h>
+#include <llvm/Support/raw_ostream.h>
 #include <llvm/Transforms/Utils/Cloning.h>
+
+#include <cstdlib>
 
 #include <map>
 #include <optional>
@@ -1394,6 +1398,62 @@ int DataLayoutPass::runGlobalImpl(llvm::Module& module) {
     if (arrayInfos.empty()) return 0;
 
     auto& ctx = module.getContext();
+
+    // TEMP DIAGNOSTIC (RC5, removed once the Windows matcher is fixed): when
+    // TOPO_DLDBG names a file, dump exactly what the pass sees at its execution
+    // point — the recovered candidates, the module's identified struct types,
+    // and every getelementptr in each topo::array-touching function. The final
+    // --dump-ir IR is post-LLVM-opt (GEPs further canonicalized) and so does NOT
+    // reflect the pass-input shape; this captures the real shape on windows-2022.
+    if (const char* dbgPath = std::getenv("TOPO_DLDBG")) {
+        std::error_code ec;
+        llvm::raw_fd_ostream os(dbgPath, ec, llvm::sys::fs::OF_Append | llvm::sys::fs::OF_Text);
+        if (!ec) {
+            os << "=== runGlobalImpl on module " << module.getName() << " ===\n";
+            os << "arrayInfos=" << arrayInfos.size() << "\n";
+            for (auto& ai : arrayInfos)
+                os << "  candidate elem=" << ai.elementType->getName() << " N=" << ai.arraySize
+                   << " fields=" << ai.elementType->getNumElements() << "\n";
+            os << "identifiedStructTypes:\n";
+            for (auto* sty : module.getIdentifiedStructTypes())
+                os << "  " << (sty->hasName() ? sty->getName() : "<anon>") << "\n";
+            // Dump GEPs of any function that either is named for topo::array or
+            // contains a GEP referencing a candidate element type (covers the
+            // case where the pipeline inlined the accesses into a differently
+            // named function). Capped to keep the log bounded.
+            std::unordered_set<llvm::Type*> elemTys;
+            for (auto& ai : arrayInfos) elemTys.insert(ai.elementType);
+            int dumpedFuncs = 0;
+            for (auto& func : module) {
+                if (func.isDeclaration()) continue;
+                if (dumpedFuncs >= 12) break;
+                std::string dem = llvm::demangle(func.getName().str());
+                bool relevant = dem.find("topo::array") != std::string::npos;
+                if (!relevant)
+                    for (auto& BB : func)
+                        for (auto& I : BB)
+                            if (auto* g = llvm::dyn_cast<llvm::GetElementPtrInst>(&I)) {
+                                auto* sty = g->getSourceElementType();
+                                auto* aty = llvm::dyn_cast<llvm::ArrayType>(sty);
+                                if (elemTys.count(sty) || (aty && elemTys.count(aty->getElementType())))
+                                    relevant = true;
+                            }
+                if (!relevant) continue;
+                ++dumpedFuncs;
+                os << "FUNC " << dem << "\n";
+                int n = 0;
+                for (auto& BB : func)
+                    for (auto& I : BB)
+                        if (llvm::isa<llvm::GetElementPtrInst>(&I)) {
+                            os << "  ";
+                            I.print(os);
+                            os << "\n";
+                            if (++n >= 40) break;
+                        }
+            }
+            os << "=== end ===\n";
+        }
+    }
 
     // Step 2: Create SoA struct types
     for (auto& ai : arrayInfos) {
