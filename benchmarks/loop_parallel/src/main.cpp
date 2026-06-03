@@ -45,7 +45,14 @@ int sum(int a, int b) {
 }
 
 int run_test() {
-    return sum(scale(1.0f), negate());
+    // Sequence the staged calls explicitly. As call arguments their evaluation
+    // order is unspecified in C++ (MSVC evaluates arguments right-to-left), which
+    // reorders the stage<1> scale / stage<2> negate calls in the emitted IR and
+    // trips the stage-order verifier on Windows. Separate statements are
+    // sequenced, so every ABI emits scale -> negate -> sum.
+    int s = scale(1.0f);  // stage<1>
+    int n = negate();     // stage<2>
+    return sum(s, n);     // stage<3>
 }
 
 // --- Friendly: streaming vectorizable loop ---

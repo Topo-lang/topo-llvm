@@ -1,6 +1,7 @@
 // @category: ENHANCE
 #include "topo/Transforms/DataLayoutPass.h"
 
+#include <llvm/Demangle/Demangle.h>
 #include <llvm/IR/Constants.h>
 #include <llvm/IR/IRBuilder.h>
 #include <llvm/IR/Instructions.h>
@@ -72,6 +73,129 @@ std::optional<ArrayOfStructInfo> isFixedSizeArrayOfStruct(llvm::StructType* sty)
     if (!elemTy) return std::nullopt;
 
     return ArrayOfStructInfo{sty, elemTy, arrTy->getNumElements()};
+}
+
+// ============================================================================
+// MSVC-ABI fallback: recover topo::array<T,N> candidates whose wrapper struct
+// was elided from the IR.
+//
+// Under the MSVC ABI + opaque pointers, clang elides the single-member
+// `topo::array<T,N>` wrapper struct entirely: it never enters the module's
+// identified-struct-type list, so the primary getIdentifiedStructTypes() scan
+// finds nothing (only `%struct.<Elem>` survives). The Itanium ABI keeps
+// `%"struct.topo::array..."` as a named type, so there the scan succeeds.
+//
+// The only ABI-stable trace of the container is the mangled function name —
+// both Itanium (`topo::array<Particle, 262144ul>`) and Microsoft
+// (`struct topo::array<struct Particle, 262144>`) demangle to a readable
+// `topo::array<Elem, N>` signature. This helper recovers (Elem, N) from any
+// such parameter and resolves Elem against the element struct that IS present
+// in the module, synthesizing a wrapper StructType {[N x Elem]} so the rest of
+// the pass (which keys off ArrayOfStructInfo) works unchanged. The element/
+// field GEP access pattern the transform matches (pattern (b): `[N x Elem]`
+// element GEP + typed field GEP) is identical on both ABIs, so once the
+// candidate is recovered the transform fires normally.
+//
+// Gated on a genuine `topo::array<...>` parameter name, so incidental
+// fixed-size arrays of unrelated structs are never picked up.
+
+/// Parse the `<Elem, N>` of a demangled `topo::array<Elem, N>` signature.
+/// Returns (element-name, N); the element name may stay namespace-qualified.
+std::optional<std::pair<std::string, uint64_t>> parseArraySignature(llvm::StringRef demangled) {
+    constexpr llvm::StringRef kTag = "topo::array<";
+    size_t pos = demangled.find(kTag);
+    if (pos == llvm::StringRef::npos) return std::nullopt;
+
+    // Balanced-angle scan from the opening '<' of the template argument list.
+    size_t open = pos + kTag.size() - 1; // index of '<'
+    int depth = 0;
+    size_t commaPos = llvm::StringRef::npos;
+    size_t close = llvm::StringRef::npos;
+    for (size_t i = open; i < demangled.size(); ++i) {
+        char c = demangled[i];
+        if (c == '<') {
+            ++depth;
+        } else if (c == '>') {
+            if (--depth == 0) {
+                close = i;
+                break;
+            }
+        } else if (c == ',' && depth == 1 && commaPos == llvm::StringRef::npos) {
+            commaPos = i; // top-level comma separating Elem from N
+        }
+    }
+    if (close == llvm::StringRef::npos || commaPos == llvm::StringRef::npos) return std::nullopt;
+
+    llvm::StringRef elemPart = demangled.substr(open + 1, commaPos - (open + 1)).trim();
+    llvm::StringRef nPart = demangled.substr(commaPos + 1, close - (commaPos + 1)).trim();
+
+    // Strip a leading elaborated-type keyword the MSVC demangler emits.
+    for (llvm::StringRef kw : {"struct ", "class ", "union ", "enum "}) {
+        if (elemPart.starts_with(kw)) {
+            elemPart = elemPart.substr(kw.size()).trim();
+            break;
+        }
+    }
+    if (elemPart.empty()) return std::nullopt;
+
+    // N: leading decimal digits (Itanium appends a `ul`/`l` literal suffix).
+    uint64_t N = 0;
+    bool any = false;
+    for (char c : nPart) {
+        if (c < '0' || c > '9') break;
+        N = N * 10 + static_cast<uint64_t>(c - '0');
+        any = true;
+    }
+    if (!any || N == 0) return std::nullopt;
+
+    return std::make_pair(elemPart.str(), N);
+}
+
+/// Resolve a (possibly namespace-qualified) element type name to a StructType
+/// in the module's identified-struct list (e.g. "Particle" -> %struct.Particle,
+/// "ns::Foo" -> %"struct.ns::Foo").
+llvm::StructType* findElementStructByName(llvm::Module& module, llvm::StringRef elemName) {
+    llvm::StringRef simple = elemName;
+    if (auto p = elemName.rfind(':'); p != llvm::StringRef::npos) simple = elemName.substr(p + 1);
+
+    for (auto* sty : module.getIdentifiedStructTypes()) {
+        if (!sty->hasName()) continue;
+        llvm::StringRef bare = sty->getName();
+        for (llvm::StringRef pre : {"struct.", "class.", "union."}) {
+            if (bare.starts_with(pre)) {
+                bare = bare.substr(pre.size());
+                break;
+            }
+        }
+        if (bare == elemName || bare == simple) return sty;
+        // Namespace-qualified IR name ending in "::<simple>".
+        if (bare.ends_with(simple) && bare.size() > simple.size() + 2 &&
+            bare.substr(bare.size() - simple.size() - 2, 2) == "::")
+            return sty;
+    }
+    return nullptr;
+}
+
+/// Recover elided topo::array<Elem,N> candidates from demangled function names.
+/// Each distinct (Elem, N) yields one synthetic-wrapper ArrayOfStructInfo.
+std::vector<ArrayOfStructInfo> recoverElidedArrayTypes(llvm::Module& module) {
+    std::vector<ArrayOfStructInfo> recovered;
+    std::set<std::pair<llvm::StructType*, uint64_t>> seen;
+    auto& ctx = module.getContext();
+
+    for (auto& func : module) {
+        if (!func.hasName()) continue;
+        auto sig = parseArraySignature(llvm::demangle(func.getName().str()));
+        if (!sig) continue;
+        auto* elemTy = findElementStructByName(module, sig->first);
+        if (!elemTy) continue;
+        if (!seen.insert({elemTy, sig->second}).second) continue;
+
+        auto* arrTy = llvm::ArrayType::get(elemTy, sig->second);
+        auto* wrapper = llvm::StructType::create(ctx, {arrTy}, "struct.topo::array.recovered");
+        recovered.push_back(ArrayOfStructInfo{wrapper, elemTy, sig->second});
+    }
+    return recovered;
 }
 
 /// Recursively search for topo::array wrapper type usage from a pointer value.
@@ -1260,6 +1384,13 @@ int DataLayoutPass::runGlobalImpl(llvm::Module& module) {
             arrayInfos.push_back({info->wrapperType, info->elementType, info->arraySize, nullptr});
         }
     }
+    // MSVC-ABI fallback: when the wrapper struct was elided (so the scan above
+    // found nothing), recover (Elem, N) candidates from the mangled names that
+    // still encode `topo::array<Elem, N>`. See recoverElidedArrayTypes.
+    if (arrayInfos.empty()) {
+        for (const auto& info : recoverElidedArrayTypes(module))
+            arrayInfos.push_back({info.wrapperType, info.elementType, info.arraySize, nullptr});
+    }
     if (arrayInfos.empty()) return 0;
 
     auto& ctx = module.getContext();
@@ -1395,7 +1526,17 @@ int DataLayoutPass::runGlobalImpl(llvm::Module& module) {
                     auto* call = llvm::dyn_cast<llvm::CallInst>(gep->getPointerOperand());
                     if (!call) continue;
                     auto* callee = call->getCalledFunction();
-                    if (!callee || !callee->getName().contains("topo5array") || !callee->getName().contains("ixEm"))
+                    if (!callee) continue;
+                    // Recognize topo::array::operator[] across ABIs. The Itanium
+                    // mangling embeds "topo5array"/"ixEm", but the MSVC mangling
+                    // (??A?$array@...@@topo@@...) shares no such substring — and on
+                    // Windows operator[] is frequently NOT inlined, so this is the
+                    // path the data_layout accesses actually take. Demangle and
+                    // match the readable signature so the call is recognized on
+                    // both Itanium and MSVC.
+                    std::string calleeName = llvm::demangle(callee->getName().str());
+                    if (calleeName.find("topo::array<") == std::string::npos ||
+                        calleeName.find("operator[]") == std::string::npos)
                         continue;
 
                     // operator[](this, index): arg0 = array ptr, arg1 = index

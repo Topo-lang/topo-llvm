@@ -2,12 +2,15 @@
 #include "topo/Backend/SymbolMapper.h"
 #include "topo/Sema/TypeRegistry.h"
 
+#include <llvm/IR/DebugLoc.h>
 #include <llvm/IR/DerivedTypes.h>
 #include <llvm/IR/Instructions.h>
 #include <llvm/IR/Module.h>
 
+#include <algorithm>
 #include <unordered_map>
 #include <unordered_set>
+#include <vector>
 
 namespace topo {
 
@@ -546,8 +549,24 @@ void Verifier::checkStageOrdering(const llvm::Module& /*module*/, const SymbolMa
 
         const llvm::Function* llvmFunc = it->second;
 
-        // Traverse IR instructions in order, collect stage sequence
-        int maxStageSeen = -1;
+        // Collect staged calls, then check stage order by SOURCE position — not
+        // IR emission order. Argument-evaluation order is unspecified in C/C++
+        // and differs by ABI (e.g. MSVC evaluates call arguments right-to-left),
+        // so the IR emission order of independent sibling calls — like
+        // `sum(scale(), negate())` where scale/negate are different stages — is
+        // not a portable proxy for the declared stage order. Ordering by the
+        // call's debug location makes the check ABI-independent. Calls without a
+        // location keep their emission order (the stable tiebreaker), which
+        // preserves behaviour for IR built without debug info.
+        struct StagedCall {
+            unsigned line;
+            unsigned col;
+            size_t emitIdx;
+            int stage;
+            std::string name;
+        };
+        std::vector<StagedCall> staged;
+        size_t emitIdx = 0;
         for (const auto& bb : *llvmFunc) {
             for (const auto& inst : bb) {
                 const llvm::Function* callee = nullptr;
@@ -564,17 +583,32 @@ void Verifier::checkStageOrdering(const llvm::Module& /*module*/, const SymbolMa
                 auto stageIt = calleeStage.find(nameIt->second);
                 if (stageIt == calleeStage.end()) continue;
 
-                int currentStage = stageIt->second;
-                if (currentStage < maxStageSeen) {
-                    diag_.error(block.location,
-                                "fn block '" + blockName + "': IR calls '" + nameIt->second + "' (stage " +
-                                    std::to_string(currentStage) + ") after a stage " + std::to_string(maxStageSeen) +
-                                    " operation — violates stage ordering");
-                    ++result.stageOrderViolations;
+                unsigned line = 0, col = 0;
+                if (const llvm::DebugLoc& dl = inst.getDebugLoc()) {
+                    line = dl.getLine();
+                    col = dl.getCol();
                 }
-                if (currentStage > maxStageSeen) {
-                    maxStageSeen = currentStage;
-                }
+                staged.push_back({line, col, emitIdx++, stageIt->second, nameIt->second});
+            }
+        }
+
+        std::stable_sort(staged.begin(), staged.end(), [](const StagedCall& a, const StagedCall& b) {
+            if (a.line != b.line) return a.line < b.line;
+            if (a.col != b.col) return a.col < b.col;
+            return a.emitIdx < b.emitIdx;
+        });
+
+        int maxStageSeen = -1;
+        for (const auto& sc : staged) {
+            if (sc.stage < maxStageSeen) {
+                diag_.error(block.location,
+                            "fn block '" + blockName + "': IR calls '" + sc.name + "' (stage " +
+                                std::to_string(sc.stage) + ") after a stage " + std::to_string(maxStageSeen) +
+                                " operation — violates stage ordering");
+                ++result.stageOrderViolations;
+            }
+            if (sc.stage > maxStageSeen) {
+                maxStageSeen = sc.stage;
             }
         }
     }

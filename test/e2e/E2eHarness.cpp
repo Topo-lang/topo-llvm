@@ -16,6 +16,19 @@
 
 namespace topo::test::e2e {
 
+namespace {
+// std::filesystem::copy_file(overwrite_existing) is unreliable on MinGW/Windows:
+// it throws EEXIST ("File exists") when the destination already exists instead
+// of overwriting. Remove the destination first, then copy into the now-absent
+// path — portable and equivalent to an overwrite on every platform. Keeps the
+// throwing semantics of the call sites (a genuine copy failure still throws).
+void overwriteCopy(const fs::path& from, const fs::path& to) {
+    std::error_code rmEc;
+    fs::remove(to, rmEc); // ignore "does not exist"
+    fs::copy_file(from, to);
+}
+} // namespace
+
 // ============================================================================
 // SetUp
 // ============================================================================
@@ -52,19 +65,26 @@ void E2eFixture::SetUp() {
     //   (1) sibling lookup next to argv[0]
     //   (2) PATH search
     // Inject the backend-tool build dirs into PATH so the subprocess find
-    // succeeds. TOPO_BUILD_LLVM_TOOLS_DIRS is a delimited list set at
-    // compile time by the e2e CMakeLists via $<TARGET_FILE_DIR:...>.
-#ifdef TOPO_BUILD_LLVM_TOOLS_DIRS
+    // succeeds. The dirs are provided as separate single-path macros (set at
+    // compile time by the e2e CMakeLists via $<TARGET_FILE_DIR:...>) and joined
+    // here with the platform PATH separator — a single delimited macro can't
+    // carry a ';' through CMake's compile-definition list (see CMakeLists).
+#if defined(TOPO_BUILD_LLVM_TOOLS_DIR_CPP)
     {
-        const std::string toolsDirs = TOPO_BUILD_LLVM_TOOLS_DIRS;
+#ifdef _WIN32
+        const char sep = ';';
+#else
+        const char sep = ':';
+#endif
+        std::string toolsDirs = TOPO_BUILD_LLVM_TOOLS_DIR_CPP;
+        toolsDirs += sep;
+        toolsDirs += TOPO_BUILD_LLVM_TOOLS_DIR_RUST;
+        toolsDirs += sep;
+        toolsDirs += TOPO_BUILD_LLVM_TOOLS_DIR_MIXED;
         const char* oldPath = std::getenv("PATH");
         std::string newPath = toolsDirs;
         if (oldPath && *oldPath) {
-#ifdef _WIN32
-            newPath += ";";
-#else
-            newPath += ":";
-#endif
+            newPath += sep;
             newPath += oldPath;
         }
 #ifdef _WIN32
@@ -148,8 +168,8 @@ RunResult E2eFixture::topoBaseBuild(const std::string& projectName,
     }
 
     // Swap Topo.toml → Topo-base.toml
-    fs::copy_file(topoToml, saved, fs::copy_options::overwrite_existing);
-    fs::copy_file(baseToml, topoToml, fs::copy_options::overwrite_existing);
+    overwriteCopy(topoToml, saved);
+    overwriteCopy(baseToml, topoToml);
 
     // Clean incremental cache
     {
@@ -160,7 +180,7 @@ RunResult E2eFixture::topoBaseBuild(const std::string& projectName,
     auto result = topoBuild(projectName);
 
     // Restore original
-    fs::copy_file(saved, topoToml, fs::copy_options::overwrite_existing);
+    overwriteCopy(saved, topoToml);
     fs::remove(saved);
 
     return result;
@@ -191,8 +211,8 @@ RunResult E2eFixture::topoForcedBuild(const std::string& projectName,
     }
 
     // Swap Topo.toml → Topo-forced.toml
-    fs::copy_file(topoToml, saved, fs::copy_options::overwrite_existing);
-    fs::copy_file(forcedToml, topoToml, fs::copy_options::overwrite_existing);
+    overwriteCopy(topoToml, saved);
+    overwriteCopy(forcedToml, topoToml);
 
     // Clean incremental cache
     {
@@ -203,7 +223,7 @@ RunResult E2eFixture::topoForcedBuild(const std::string& projectName,
     auto result = topoBuild(projectName);
 
     // Restore original
-    fs::copy_file(saved, topoToml, fs::copy_options::overwrite_existing);
+    overwriteCopy(saved, topoToml);
     fs::remove(saved);
 
     return result;
@@ -569,8 +589,21 @@ RunResult E2eFixture::vanillaSharedBuild(const std::string& projectName, const s
 RunResult E2eFixture::runBinary(const std::string& projectName, const std::string& outputName) {
     fs::path binPath = binaryPath(projectName, outputName);
     std::string exe = binPath.generic_string();
-    fs::path projDir = projectsDir_ / projectName;
-    std::string workDir = projDir.generic_string();
+
+    // Benchmark binaries can legitimately run close to two minutes on the slow
+    // Windows CI runner (e.g. pipeline_forced's warmup + 7×100 benchmark rounds
+    // take ~115-121s there). The capture helpers' no-timeout overload uses a
+    // 120s internal deadline, so a run that crosses 120s was force-killed and
+    // reported as exitCode -1 — a flaky failure that depended purely on whether
+    // the workload finished under or over 120s (observed: passed at 114.18s,
+    // failed at 121.27s on identical code). Use an explicit deadline matched to
+    // the e2e-equivalence ctest TIMEOUT (300s), kept just under it so the helper
+    // reaps partial output before ctest kills the whole gtest process. The
+    // benchmark binaries are invoked by absolute path and perform no
+    // working-directory-relative I/O at run time (the JIT engine is located via
+    // the PATH/loader env set below), so the run does not depend on a working
+    // directory.
+    constexpr int kBinaryRunDeadlineMs = 290000; // 290s, just under the 300s ctest e2e timeout
 
     // Set library search path so the JIT engine shared library can be found
     // at runtime. Each CTest case invokes its own gtest process, so the
@@ -604,7 +637,7 @@ RunResult E2eFixture::runBinary(const std::string& projectName, const std::strin
 #endif
 #endif // TOPO_JIT_ENGINE_DIR
 
-    auto r = platform::runProcessCapture(exe, {}, workDir);
+    auto r = platform::runProcessCaptureWithTimeout(exe, {}, kBinaryRunDeadlineMs);
 
 #ifdef TOPO_JIT_ENGINE_DIR
     // Restore original value
@@ -992,15 +1025,21 @@ E2eFixture::TomlConfig E2eFixture::parseTopoToml(const std::string& projectName)
 
 namespace {
 
-// Locate the .ll file written by `--dump-ir`. topo-build places it at
-// `<outputPath>.ll` — in practice, alongside the compiled binary. Try both
-// project root (where the binary lives for topo-build outputs) and
-// `build/<name>.ll` (where vanillaBuild places its baseline).
+// Locate the .ll file written by `--dump-ir`. topo-build emits the dump at
+// `<outputPath>.ll`, and outputPath carries the platform executable suffix
+// (topo-build's autoExtension appends ExeSuffix), so on Windows the dump is
+// `<name>.exe.ll`, not `<name>.ll`. Probe the suffixed and bare names in both
+// the project root (topo-build output) and `build/` (vanillaBuild baseline).
 fs::path findDumpedIR(const fs::path& projectDir, const std::string& outputName) {
-    fs::path root = projectDir / (outputName + ".ll");
-    if (fs::exists(root)) return root;
-    fs::path inBuild = projectDir / "build" / (outputName + ".ll");
-    if (fs::exists(inBuild)) return inBuild;
+    const std::string exe(platform::ExeSuffix); // "" on POSIX, ".exe" on Windows
+    std::vector<std::string> names = {outputName + ".ll"};
+    if (!exe.empty()) names.push_back(outputName + exe + ".ll");
+    for (const auto& dir : {projectDir, projectDir / "build"}) {
+        for (const auto& name : names) {
+            fs::path p = dir / name;
+            if (fs::exists(p)) return p;
+        }
+    }
     return {};
 }
 
@@ -1074,6 +1113,11 @@ std::set<std::string> E2eFixture::collectPassFiredMarkers(const std::string& pro
     std::set<std::string> names;
     for (const auto& m : markers) names.insert(m.passName);
     return names;
+}
+
+fs::path E2eFixture::dumpedIRPath(const std::string& projectName,
+                                  const std::string& outputName) {
+    return findDumpedIR(projectsDir_ / projectName, outputName);
 }
 
 unsigned E2eFixture::getPassFiredCount(const std::string& projectName,

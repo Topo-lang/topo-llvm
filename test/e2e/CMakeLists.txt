@@ -41,10 +41,16 @@ target_compile_definitions(E2eHarnessLlvm PUBLIC
     # layout, where the benchmark Topo.toml's meta-sibling include is absent.
     # Empty in the meta build → the harness's existence guard adds nothing.
     TOPO_LANG_CPP_RUNTIME_INCLUDE="${_TOPO_E2E_STDLIB_INC}"
-    # Backend-tool dirs — colon-separated (semicolon on Windows). The harness
-    # prepends every dir to PATH so the imported topo-build CLI resolves
-    # sibling backend tools built in this repo.
-    TOPO_BUILD_LLVM_TOOLS_DIRS="$<TARGET_FILE_DIR:topo-build-llvm-cpp>$<IF:$<PLATFORM_ID:Windows>,$<SEMICOLON>,:>$<TARGET_FILE_DIR:topo-build-llvm-rust>$<IF:$<PLATFORM_ID:Windows>,$<SEMICOLON>,:>$<TARGET_FILE_DIR:topo-build-llvm-mixed>"
+    # Backend-tool dirs — passed as three separate single-path macros, joined
+    # at runtime by the harness with the platform PATH separator and prepended
+    # to PATH so the imported topo-build CLI resolves sibling backend tools
+    # built in this repo. A single delimited macro is unsafe: a ';' inside a
+    # compile definition is CMake's list separator, so it splits into multiple
+    # -D flags and mangles the compile command on Windows (clang then sees the
+    # source swallowed by the broken quoting → "no input files").
+    TOPO_BUILD_LLVM_TOOLS_DIR_CPP="$<TARGET_FILE_DIR:topo-build-llvm-cpp>"
+    TOPO_BUILD_LLVM_TOOLS_DIR_RUST="$<TARGET_FILE_DIR:topo-build-llvm-rust>"
+    TOPO_BUILD_LLVM_TOOLS_DIR_MIXED="$<TARGET_FILE_DIR:topo-build-llvm-mixed>"
 )
 topo_set_compiler_flags(E2eHarnessLlvm)
 
