@@ -589,8 +589,21 @@ RunResult E2eFixture::vanillaSharedBuild(const std::string& projectName, const s
 RunResult E2eFixture::runBinary(const std::string& projectName, const std::string& outputName) {
     fs::path binPath = binaryPath(projectName, outputName);
     std::string exe = binPath.generic_string();
-    fs::path projDir = projectsDir_ / projectName;
-    std::string workDir = projDir.generic_string();
+
+    // Benchmark binaries can legitimately run close to two minutes on the slow
+    // Windows CI runner (e.g. pipeline_forced's warmup + 7×100 benchmark rounds
+    // take ~115-121s there). The capture helpers' no-timeout overload uses a
+    // 120s internal deadline, so a run that crosses 120s was force-killed and
+    // reported as exitCode -1 — a flaky failure that depended purely on whether
+    // the workload finished under or over 120s (observed: passed at 114.18s,
+    // failed at 121.27s on identical code). Use an explicit deadline matched to
+    // the e2e-equivalence ctest TIMEOUT (300s), kept just under it so the helper
+    // reaps partial output before ctest kills the whole gtest process. The
+    // benchmark binaries are invoked by absolute path and perform no
+    // working-directory-relative I/O at run time (the JIT engine is located via
+    // the PATH/loader env set below), so the run does not depend on a working
+    // directory.
+    constexpr int kBinaryRunDeadlineMs = 290000; // 290s, just under the 300s ctest e2e timeout
 
     // Set library search path so the JIT engine shared library can be found
     // at runtime. Each CTest case invokes its own gtest process, so the
@@ -624,7 +637,7 @@ RunResult E2eFixture::runBinary(const std::string& projectName, const std::strin
 #endif
 #endif // TOPO_JIT_ENGINE_DIR
 
-    auto r = platform::runProcessCapture(exe, {}, workDir);
+    auto r = platform::runProcessCaptureWithTimeout(exe, {}, kBinaryRunDeadlineMs);
 
 #ifdef TOPO_JIT_ENGINE_DIR
     // Restore original value
