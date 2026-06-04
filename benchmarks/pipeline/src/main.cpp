@@ -11,6 +11,7 @@
 #include <cassert>
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <vector>
 
 // --- Friendly: pipeline-generated path ---
@@ -54,9 +55,18 @@ static long long benchmark(int rounds, int iters, F&& work) {
 }
 
 int main() {
-    constexpr int ROUNDS = 7;
-    constexpr int WARMUP = 50;
-    constexpr int ITERS = 100;
+    // Correctness/equivalence runs only need a handful of iterations to verify
+    // base==forced and that the pass fired; the heavy perf-grade counts are for
+    // the perf harness. The forced parallel pipeline spawns a topo_task per
+    // imaging::process call (~13us/task × millions), so the full counts make the
+    // e2e equivalence run ~110-270s on the slow Windows CI runner. The
+    // correctness executables (topo-e2e-equivalence / -functional) set
+    // TOPO_BENCH_QUICK; the perf executables (topo-e2e-perf / -pass-bench) leave
+    // it unset and keep the full counts, so perf measurement is unaffected.
+    const bool quick = std::getenv("TOPO_BENCH_QUICK") != nullptr;
+    const int ROUNDS = quick ? 1 : 7;
+    const int WARMUP = quick ? 2 : 50;
+    const int ITERS = quick ? 3 : 100;
 
     topo::parallel::init();
 
