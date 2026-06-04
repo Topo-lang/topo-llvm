@@ -142,12 +142,18 @@ static long long benchmark(int rounds, int iters, F&& work) {
 }
 
 int main() {
-    constexpr int ROUNDS = 7;
-    constexpr int WARMUP = 50;
-    constexpr int ITERS_FRIENDLY = 20000;
+    // Quick mode (the correctness executables set TOPO_BENCH_QUICK) needs only a
+    // few iterations: the compared output is the run_bench() checksum +
+    // assertions, independent of these perf-loop counts (RESULT_US_* is
+    // timing-stripped). The perf harness leaves the env unset and keeps the full
+    // counts. The N data sizes elsewhere are unaffected.
+    const bool quick = std::getenv("TOPO_BENCH_QUICK") != nullptr;
+    const int ROUNDS = quick ? 1 : 7;
+    const int WARMUP = quick ? 2 : 50;
+    const int ITERS_FRIENDLY = quick ? 10 : 20000;
     // Unfriendly numbers are no longer asserted (see comment on
     // unfriendly_demo above); keep ITERS aligned with the friendly side.
-    constexpr int ITERS_UNFRIENDLY = 20000;
+    const int ITERS_UNFRIENDLY = quick ? 10 : 20000;
 
     // Correctness
     std::printf("25_lifetime_arena: result=%d\n", arena_demo::run_bench());

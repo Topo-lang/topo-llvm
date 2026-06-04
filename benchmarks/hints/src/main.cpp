@@ -7,6 +7,7 @@
 #include <cassert>
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <vector>
 
 #ifdef _MSC_VER
@@ -84,9 +85,13 @@ static long long benchmark(int rounds, int iters, F&& work) {
 }
 
 int main() {
-    constexpr int ROUNDS = 7;
-    constexpr int WARMUP = 100;
-    constexpr int ITERS = 5000;
+    // Quick mode (the correctness executables set TOPO_BENCH_QUICK): the compared
+    // output is the collect() sum + assertions, independent of these perf-loop
+    // counts (RESULT_US_* is timing-stripped). The perf harness keeps full counts.
+    const bool quick = std::getenv("TOPO_BENCH_QUICK") != nullptr;
+    const int ROUNDS = quick ? 1 : 7;
+    const int WARMUP = quick ? 2 : 100;
+    const int ITERS = quick ? 10 : 5000;
 
     // Correctness check
     run(100);
