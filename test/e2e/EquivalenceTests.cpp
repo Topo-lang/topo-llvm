@@ -4,6 +4,7 @@
 #include "topo/Platform/Process.h"
 
 #include <cstdio>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <regex>
@@ -13,6 +14,27 @@
 namespace topo::test::e2e {
 
 namespace fs = std::filesystem;
+
+// Equivalence tests only verify base==forced semantics + pass-fired markers, so
+// the benchmark binaries they run need only a few iterations. Benchmarks that
+// honor TOPO_BENCH_QUICK (e.g. pipeline) shrink their perf-grade loops when it
+// is set. This is scoped to the correctness executables: it lives in
+// EquivalenceTests.cpp (-> topo-e2e-equivalence) and FunctionalTests.cpp, NOT in
+// the perf executables (topo-e2e-perf / -pass-bench), which must run full counts
+// for meaningful measurement — so it lives in this correctness TU, not in the
+// shared E2eHarness lib. Set at load time so every runBinary() child process
+// inherits it. See benchmarks/pipeline/src/main.cpp.
+namespace {
+struct EnableQuickBenchIters {
+    EnableQuickBenchIters() {
+#ifdef _WIN32
+        _putenv_s("TOPO_BENCH_QUICK", "1");
+#else
+        ::setenv("TOPO_BENCH_QUICK", "1", 1);
+#endif
+    }
+} g_enableQuickBenchIters;
+} // namespace
 
 // ============================================================================
 // B2: IR Semantic Equivalence Tests
