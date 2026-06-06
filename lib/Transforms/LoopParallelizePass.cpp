@@ -1043,6 +1043,15 @@ static int partitionLoopsPhase2(llvm::Module& module,
             // Safety: no sub-loops (only innermost loops)
             if (!loop->getSubLoops().empty()) continue;
 
+            // Safety: single-block body only. outlineLoopBody() flattens every
+            // non-header block into one straight-line block, dropping internal
+            // terminators and body PHIs — correct only when the body has no
+            // internal control flow. A loop with an internal branch (if/else
+            // -> >2 blocks and a merge PHI) would otherwise be silently
+            // miscompiled (conditional code run unconditionally, merge PHI
+            // RAUW'd to undef). Decline it rather than miscompile.
+            if (loop->getNumBlocks() > 2) continue;
+
             // Safety: no sync primitives
             if (containsSyncPrimitives(loop)) continue;
 
