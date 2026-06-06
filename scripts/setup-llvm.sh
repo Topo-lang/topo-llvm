@@ -212,4 +212,43 @@ if [ "$PLATFORM" = "windows" ]; then
     fi
 fi
 
+# Conservative post-extract trim of the bundled tree (fallback path only).
+# Deletes only definitively-unused bin/ tools — MLIR (Topo uses zero MLIR),
+# the lldb CLI family (topo-debug links lib/liblldb.* via the C++ API, never
+# spawns the CLI), and standalone clang tools Topo never invokes — freeing
+# ~1.8G (7.3G -> ~5.5G). Operates on bin/ ONLY; lib/ (libLLVM/libclang/
+# liblldb + static archives + lib/cmake for find_package) and include/ are
+# load-bearing and left untouched. Opt out with TOPO_LLVM_NO_TRIM=1.
+trim_llvm_tree() {
+    if [ -n "${TOPO_LLVM_NO_TRIM:-}" ]; then
+        echo "TOPO_LLVM_NO_TRIM set — keeping full LLVM tree"
+        return
+    fi
+    bindir="$LLVM_DIR/bin"
+    [ -d "$bindir" ] || return
+    before=$(du -sk "$LLVM_DIR" 2>/dev/null | cut -f1)
+
+    # MLIR — zero MLIR anywhere in Topo (glob-safe; '*' also covers .exe)
+    find "$bindir" -maxdepth 1 -name 'mlir-*' -delete 2>/dev/null || true
+    find "$bindir" -maxdepth 1 -name 'mlir'   -delete 2>/dev/null || true
+    # lldb CLI family — Topo links lib/liblldb.* (kept), never spawns lldb
+    find "$bindir" -maxdepth 1 -name 'lldb*' -delete 2>/dev/null || true
+    # Unused standalone clang tools — EXPLICIT names only.
+    # NEVER a clang-* glob: it would clobber clang-<major> (the real binary).
+    for t in clang-repl clang-check clang-scan-deps clang-rename \
+             clang-refactor clang-tidy clang-import-test \
+             clang-extdef-mapping clang-offload-bundler \
+             clang-offload-packager clang-linker-wrapper c-index-test; do
+        rm -f "$bindir/$t" "$bindir/$t.exe" 2>/dev/null || true
+    done
+
+    after=$(du -sk "$LLVM_DIR" 2>/dev/null | cut -f1)
+    if [ -n "$before" ] && [ -n "$after" ]; then
+        echo "Trimmed unused LLVM tools: freed $(( (before - after) / 1024 )) MB" \
+             "(set TOPO_LLVM_NO_TRIM=1 to keep all)"
+    fi
+}
+
+trim_llvm_tree
+
 echo "LLVM $VER installed to topo-llvm/llvm-dev/"
