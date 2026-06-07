@@ -41,34 +41,12 @@ namespace fs = std::filesystem;
 /// Resolve the clang++ that compiles + links this build, preferring the
 /// LLVM bundled with THIS backend tool.
 ///
-/// The IR this tool emits is produced by the libLLVM statically linked into
-/// it (the bundled LLVM, e.g. 22.x). The link step re-parses that IR, so the
-/// reader clang MUST be the same major version — a forward-incompatible older
-/// clang rejects it with `Unknown attribute kind` / `linking failed`. The
-/// generic `topo::platform::resolveLLVMTool` lives in topo-core's TopoPlatform,
-/// whose `TOPO_LLVM_BINDIR` is empty when topo-core was built zero-LLVM (the
-/// standalone backend-repo install layout); it then falls back to a bare
-/// `"clang++"` on PATH, which on a stock Linux runner is the system clang
-/// (e.g. 18.x) — older than the producer, so the link fails. This backend
-/// executable bakes its OWN `TOPO_LLVM_BINDIR` (= the bundled bin dir) at build
-/// time, so prefer that here and only fall back to topo-core resolution.
-static std::string resolveBundledClangxx() {
-#ifdef TOPO_LLVM_BINDIR
-    if (std::string_view(TOPO_LLVM_BINDIR).size() > 0) {
-        fs::path bundled = fs::path(TOPO_LLVM_BINDIR) / "clang++";
-        if constexpr (topo::platform::IsWindows) {
-            if (!fs::exists(bundled) && bundled.extension().empty()) {
-                bundled = fs::path(TOPO_LLVM_BINDIR) /
-                          ("clang++" + std::string(topo::platform::ExeSuffix));
-            }
-        }
-        if (fs::exists(bundled)) {
-            return bundled.string();
-        }
-    }
-#endif
-    return topo::platform::resolveLLVMTool("clang++");
-}
+// The reader clang that re-parses this tool's emitted IR must match the
+// producer's LLVM major (a forward-incompatible older clang rejects it). That
+// invariant is enforced centrally by topo::platform::llvmClangxx() — its
+// BYO-priority resolver gates every candidate on the pinned LLVM major and
+// prefers the build's own LLVM when present, so no per-tool clang++ resolver
+// is needed here.
 
 /// Expect `backendExtras[key]` to be a JSON string (when present). Returns
 /// false on type mismatch with a key-pointing diagnostic. Absent key is OK.
@@ -127,7 +105,7 @@ int main(int argc, char* argv[]) {
     compileCfg.language = topo::HostLanguage::Cpp;
     compileCfg.sources = req.sources;
     compileCfg.includeDirs = req.includeDirs;
-    compileCfg.hostCompilerPath = hostCompiler.empty() ? resolveBundledClangxx() : hostCompiler;
+    compileCfg.hostCompilerPath = hostCompiler.empty() ? topo::platform::llvmClangxx() : hostCompiler;
     compileCfg.standard = standard;
     compileCfg.outputType = req.config.outputType;
     compileCfg.embedIR = req.config.embedIR;
@@ -284,7 +262,7 @@ int main(int argc, char* argv[]) {
     linkCfg.outputType = req.config.outputType;
     linkCfg.optLevel = req.config.optLevel;
     linkCfg.buildMode = req.config.buildMode;
-    linkCfg.hostCompilerPath = hostCompiler.empty() ? resolveBundledClangxx() : hostCompiler;
+    linkCfg.hostCompilerPath = hostCompiler.empty() ? topo::platform::llvmClangxx() : hostCompiler;
     linkCfg.standard = standard;
     linkCfg.linkLibs = req.linkLibs;
     linkCfg.linkDirs = req.linkDirs;

@@ -41,29 +41,10 @@ static bool expectStringIfPresent(const nlohmann::json& extras, const char* key)
 }
 
 /// Resolve the clang++ that links this build, preferring the LLVM bundled
-/// with THIS backend tool. The IR is produced by the libLLVM linked into this
-/// tool, so the reader clang must share its major version; topo-core's generic
-/// resolver falls back to a bare `"clang++"` on PATH (= the system clang, older
-/// on a stock Linux runner) when topo-core was built zero-LLVM. This executable
-/// bakes its own bundled `TOPO_LLVM_BINDIR`, so prefer that. See
-/// topo-build-llvm-cpp/main.cpp for the full rationale.
-static std::string resolveBundledClangxx() {
-#ifdef TOPO_LLVM_BINDIR
-    if (std::string_view(TOPO_LLVM_BINDIR).size() > 0) {
-        fs::path bundled = fs::path(TOPO_LLVM_BINDIR) / "clang++";
-        if constexpr (topo::platform::IsWindows) {
-            if (!fs::exists(bundled) && bundled.extension().empty()) {
-                bundled = fs::path(TOPO_LLVM_BINDIR) /
-                          ("clang++" + std::string(topo::platform::ExeSuffix));
-            }
-        }
-        if (fs::exists(bundled)) {
-            return bundled.string();
-        }
-    }
-#endif
-    return topo::platform::resolveLLVMTool("clang++");
-}
+// The reader clang that re-parses this tool's emitted IR must share the
+// producer's LLVM major. topo::platform::llvmClangxx() enforces that centrally
+// (its resolver gates on the pinned LLVM major and prefers the build's own
+// LLVM), so no per-tool clang++ resolver is needed here.
 
 int main(int argc, char* argv[]) {
     if (argc < 2) {
@@ -223,7 +204,7 @@ int main(int argc, char* argv[]) {
     linkCfg.outputType = req.config.outputType;
     linkCfg.optLevel = req.config.optLevel;
     linkCfg.buildMode = req.config.buildMode;
-    linkCfg.hostCompilerPath = hostCompiler.empty() ? resolveBundledClangxx() : hostCompiler;
+    linkCfg.hostCompilerPath = hostCompiler.empty() ? topo::platform::llvmClangxx() : hostCompiler;
     linkCfg.standard = standard;
     linkCfg.linkLibs = req.linkLibs;
     linkCfg.linkDirs = req.linkDirs;

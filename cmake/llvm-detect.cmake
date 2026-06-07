@@ -71,6 +71,12 @@ endif()
 find_package(LLVM REQUIRED CONFIG)
 message(STATUS "Found LLVM ${LLVM_PACKAGE_VERSION} at ${LLVM_DIR}")
 
+# Pinned LLVM major — seeds the runtime version gate in topo-core's
+# Platform/ToolResolution.cpp (TOPO_LLVM_MAJOR compile-def) so a relocated
+# binary rejects a wrong-major BYO LLVM. Sourced from the LLVM actually found
+# (authoritative) rather than re-parsing .llvm-version.
+set(TOPO_LLVM_MAJOR "${LLVM_VERSION_MAJOR}" CACHE STRING "Pinned LLVM major" FORCE)
+
 # Workaround: the bundled LLVM tarball on GHA Linux references the
 # non-PIC /usr/lib/x86_64-linux-gnu/libzstd.a, which cannot be linked
 # into SHARED targets (e.g. libtopo-jit-engine.so → "recompile with
