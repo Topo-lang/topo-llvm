@@ -363,4 +363,90 @@ TEST_F(DataLayoutPassTest, ScalarArraySkipped) {
     EXPECT_EQ(result, 0); // Scalar array → no transform
 }
 
+// Regression: a pipeline with TWO qualifying topo::array parameters must not
+// double-terminate the entry block. The legacy transform's per-parameter loop
+// used to re-fetch the (already-branched) entry block and emit a second
+// unconditional branch into a new scatter loop, producing two terminators —
+// malformed IR that trips verifyModule. The fix transforms only the first
+// qualifying array parameter and declines the rest, so the result must verify.
+TEST_F(DataLayoutPassTest, TwoArrayParamsProduceValidIR) {
+    llvm::LLVMContext ctx;
+    auto module = std::make_unique<llvm::Module>("test_two_arrays", ctx);
+    auto* floatTy = llvm::Type::getFloatTy(ctx);
+    auto* i32Ty = llvm::Type::getInt32Ty(ctx);
+    auto* voidTy = llvm::Type::getVoidTy(ctx);
+    auto* ptrTy = llvm::PointerType::get(ctx, 0);
+
+    constexpr uint64_t N = 128;
+    auto* particleSty = llvm::StructType::create(ctx, {floatTy, floatTy, floatTy, i32Ty}, "struct.Particle");
+    auto* arrTy = llvm::ArrayType::get(particleSty, N);
+    auto* wrapperSty = llvm::StructType::create(ctx, {arrTy}, "struct.topo::array");
+
+    auto* zero = llvm::ConstantInt::get(i32Ty, 0);
+
+    // node(ptr): reads fields {0,1} from its array argument.
+    auto* nodeFuncTy = llvm::FunctionType::get(voidTy, {ptrTy}, false);
+    auto* nodeFunc = llvm::Function::Create(nodeFuncTy, llvm::GlobalValue::ExternalLinkage, "node", *module);
+    {
+        auto* bb = llvm::BasicBlock::Create(ctx, "entry", nodeFunc);
+        llvm::IRBuilder<> b(bb);
+        auto* arg = nodeFunc->getArg(0);
+        auto* gep0 = b.CreateGEP(wrapperSty, arg, {zero, zero, llvm::ConstantInt::get(i32Ty, 0), zero}, "x");
+        b.CreateLoad(floatTy, gep0);
+        auto* gep1 = b.CreateGEP(
+            wrapperSty, arg, {zero, zero, llvm::ConstantInt::get(i32Ty, 0), llvm::ConstantInt::get(i32Ty, 1)}, "y");
+        b.CreateLoad(floatTy, gep1);
+        b.CreateRetVoid();
+    }
+
+    // pipeline(ptr src, ptr dst): two topo::array<Particle,N> parameters.
+    auto* pipelineFuncTy = llvm::FunctionType::get(i32Ty, {ptrTy, ptrTy}, false);
+    auto* pipelineFunc =
+        llvm::Function::Create(pipelineFuncTy, llvm::GlobalValue::ExternalLinkage, "pipeline", *module);
+    {
+        auto* bb = llvm::BasicBlock::Create(ctx, "entry", pipelineFunc);
+        llvm::IRBuilder<> b(bb);
+        b.CreateCall(nodeFunc, {pipelineFunc->getArg(0)});
+        b.CreateCall(nodeFunc, {pipelineFunc->getArg(1)});
+        b.CreateRet(zero);
+    }
+
+    SymbolTable symbols;
+    ClassSymbol particleClass;
+    particleClass.qualifiedName = "physics::Particle";
+    particleClass.simpleName = "Particle";
+    particleClass.visibility = Visibility::Public;
+    particleClass.memberVars = {{"x", {}, false, {}}, {"y", {}, false, {}}, {"z", {}, false, {}}, {"id", {}, false, {}}};
+    symbols.addClassSymbol(particleClass);
+
+    FunctionSymbol nodeSym;
+    nodeSym.qualifiedName = "physics::node";
+    nodeSym.simpleName = "node";
+    nodeSym.visibility = Visibility::Protected;
+    symbols.addFunction(nodeSym);
+
+    LogicBlockEntry lb;
+    lb.qualifiedName = "physics::simulate";
+    lb.simpleName = "simulate";
+    lb.isPipeline = true;
+    lb.calledFunctions = {"physics::node"};
+    PipelineAnalysis analysis;
+    analysis.stages = {{"node", 1}};
+    lb.pipelineAnalysis = analysis;
+    symbols.addLogicBlock(lb);
+
+    SymbolMapping mapping;
+    mapping.matched["physics::simulate"] = pipelineFunc;
+    mapping.matched["physics::node"] = nodeFunc;
+
+    DataLayoutConfig config;
+    config.mode = FeatureMode::Force;
+
+    DataLayoutPass::run(*module, symbols, mapping, config);
+
+    // The result must be valid IR — no double-terminated entry block.
+    EXPECT_FALSE(llvm::verifyModule(*module, nullptr))
+        << "two-array-param pipeline produced malformed IR";
+}
+
 } // namespace

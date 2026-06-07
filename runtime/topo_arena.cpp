@@ -37,24 +37,47 @@ struct topo_arena {
     void* alloc(size_t size, size_t alignment) {
         if (blocks.empty()) return nullptr;
 
+        // Overflow guard: `size` is caller-influenced (e.g. LifetimeArenaPass
+        // lowers calloc(count, elemSize) to an unchecked count*elemSize). If
+        // padding + size or size + alignment wraps size_t, the capacity checks
+        // below pass spuriously and we hand back a pointer claiming far more
+        // usable space than the block actually has — a heap buffer overflow on
+        // first write. Reject any request that cannot be expressed without
+        // wrapping. `alignment` is small (a power of two), so this only fails
+        // for genuinely absurd (overflowed) sizes; a legitimate large alloc
+        // still falls through to the (failing) malloc and returns nullptr.
+        if (size > SIZE_MAX - alignment) return nullptr;
+
         // Try current block
         Block& current = blocks.back();
         uintptr_t addr = reinterpret_cast<uintptr_t>(current.data + current.used);
         uintptr_t aligned = (addr + alignment - 1) & ~(alignment - 1);
         size_t padding = aligned - addr;
 
-        if (current.used + padding + size <= current.capacity) {
+        // Non-wrapping fast-path test. `padding <= alignment - 1` and
+        // `size <= SIZE_MAX - alignment`, so `padding + size` cannot wrap.
+        // Compare against remaining room computed by subtraction (used is
+        // always <= capacity, so capacity - used is non-negative).
+        if (padding + size <= current.capacity - current.used) {
             current.used += padding + size;
             return reinterpret_cast<void*>(aligned);
         }
 
-        // Allocate new block
+        // Allocate a new block. `size + alignment` is wrap-safe given the
+        // guard above. addBlock rounds up to defaultBlockSize, so the new
+        // block always has room for `padding + size` (padding < alignment),
+        // but assert that invariant defensively before claiming the bytes.
         if (!addBlock(size + alignment)) return nullptr;
 
         Block& newBlock = blocks.back();
         addr = reinterpret_cast<uintptr_t>(newBlock.data);
         aligned = (addr + alignment - 1) & ~(alignment - 1);
         padding = aligned - addr;
+        if (padding + size > newBlock.capacity) {
+            // Should be unreachable (cap >= size + alignment > padding + size),
+            // but never hand back a pointer the block cannot back.
+            return nullptr;
+        }
         newBlock.used = padding + size;
         return reinterpret_cast<void*>(aligned);
     }

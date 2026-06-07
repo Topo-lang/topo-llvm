@@ -594,3 +594,207 @@ TEST_F(LoopParallelizePassTest, Phase2InstrumentedPartition) {
     EXPECT_NE(module->getFunction("topo_cost_begin"), nullptr);
     EXPECT_NE(module->getFunction("topo_cost_end"), nullptr);
 }
+
+// =====================================================================
+// Step 2: miscompile-class safety gates (decline rather than miscompile)
+// =====================================================================
+
+namespace {
+
+/// Register `funcNames` as a parallel stage so partitionLoopsPhase2 considers
+/// each function's loops. The functions must already exist in `mod`.
+void registerParallelStage(SymbolTable& symbols,
+                           SymbolMapping& mapping,
+                           const std::string& ns,
+                           const std::vector<std::pair<std::string, llvm::Function*>>& funcs,
+                           int stage) {
+    for (const auto& [name, func] : funcs) {
+        std::string qualified = ns + "::" + name;
+        mapping.matched[qualified] = func;
+        FunctionSymbol sym;
+        sym.qualifiedName = qualified;
+        sym.simpleName = name;
+        sym.visibility = Visibility::Public;
+        symbols.addFunction(sym);
+    }
+    LogicBlockEntry entry;
+    entry.qualifiedName = ns + "::run";
+    entry.simpleName = "run";
+    for (const auto& [name, func] : funcs) {
+        (void)func;
+        entry.calledFunctions.push_back(name);
+        entry.stages.push_back(stage);
+    }
+    symbols.addLogicBlock(entry);
+}
+
+} // namespace
+
+// Memory-carried recurrence: a[i] = a[i-1] + b[i]. Splitting this across
+// concurrent partitions races on overlapping a[] slices. Must decline.
+TEST_F(LoopParallelizePassTest, Phase2SkipsMemoryCarriedRecurrence) {
+    auto makeFn = [&](const std::string& name) -> llvm::Function* {
+        auto* i32Ty = llvm::Type::getInt32Ty(ctx);
+        auto* ptrTy = llvm::PointerType::get(ctx, 0);
+        auto* funcTy = llvm::FunctionType::get(llvm::Type::getVoidTy(ctx), {ptrTy, ptrTy}, false);
+        auto* func = llvm::Function::Create(funcTy, llvm::Function::ExternalLinkage, name, module.get());
+
+        auto* entry = llvm::BasicBlock::Create(ctx, "entry", func);
+        auto* header = llvm::BasicBlock::Create(ctx, "loop.header", func);
+        auto* body = llvm::BasicBlock::Create(ctx, "loop.body", func);
+        auto* exit = llvm::BasicBlock::Create(ctx, "loop.exit", func);
+        auto* a = func->getArg(0);
+        auto* b = func->getArg(1);
+
+        llvm::IRBuilder<> builder(entry);
+        builder.CreateBr(header);
+
+        builder.SetInsertPoint(header);
+        auto* phi = builder.CreatePHI(i32Ty, 2, "i");
+        // start at 1 so a[i-1] is in range
+        phi->addIncoming(llvm::ConstantInt::get(i32Ty, 1), entry);
+        auto* cmp = builder.CreateICmpSLT(phi, llvm::ConstantInt::get(i32Ty, 2048), "cmp");
+        builder.CreateCondBr(cmp, body, exit);
+
+        builder.SetInsertPoint(body);
+        auto* prevIdx = builder.CreateSub(phi, llvm::ConstantInt::get(i32Ty, 1), "prev");
+        auto* prevPtr = builder.CreateGEP(i32Ty, a, {prevIdx}, "a.prev.ptr");
+        auto* prevVal = builder.CreateLoad(i32Ty, prevPtr, "a.prev");
+        auto* bPtr = builder.CreateGEP(i32Ty, b, {phi}, "b.ptr");
+        auto* bVal = builder.CreateLoad(i32Ty, bPtr, "b.cur");
+        auto* sum = builder.CreateAdd(prevVal, bVal, "sum");
+        auto* curPtr = builder.CreateGEP(i32Ty, a, {phi}, "a.cur.ptr");
+        builder.CreateStore(sum, curPtr);
+        auto* inc = builder.CreateAdd(phi, llvm::ConstantInt::get(i32Ty, 1), "inc");
+        phi->addIncoming(inc, body);
+        builder.CreateBr(header);
+
+        builder.SetInsertPoint(exit);
+        builder.CreateRetVoid();
+        return func;
+    };
+
+    registerParallelStage(symbols, mapping, "sim", {{"rec_a", makeFn("rec_a")}, {"rec_b", makeFn("rec_b")}}, 2);
+
+    LoopParallelConfig config;
+    config.mode = topo::FeatureMode::Force;
+    config.partitionEnabled = true;
+    config.reductionEnabled = true;
+
+    int result = LoopParallelizePass::run(*module, symbols, mapping, config);
+    EXPECT_GT(result, 0); // Step 1 annotation still applies
+    EXPECT_EQ(module->getFunction("topo_task_spawn"), nullptr); // never partitioned
+    EXPECT_FALSE(llvm::verifyModule(*module, &llvm::errs()));
+}
+
+// Reduction accumulator read mid-iteration: sum += i; out[i] = sum.
+// (rhs is the induction var, so the loop is store-only and bypasses the
+// memory-dep gate, isolating the reduction use-restriction.) A
+// partition-local identity-seeded accumulator would expose a partial
+// instead of the global running value. Must decline (use-restriction).
+TEST_F(LoopParallelizePassTest, Phase2SkipsReductionReadMidIteration) {
+    auto makeFn = [&](const std::string& name) -> llvm::Function* {
+        auto* i32Ty = llvm::Type::getInt32Ty(ctx);
+        auto* ptrTy = llvm::PointerType::get(ctx, 0);
+        auto* funcTy = llvm::FunctionType::get(llvm::Type::getVoidTy(ctx), {ptrTy}, false);
+        auto* func = llvm::Function::Create(funcTy, llvm::Function::ExternalLinkage, name, module.get());
+
+        auto* entry = llvm::BasicBlock::Create(ctx, "entry", func);
+        auto* header = llvm::BasicBlock::Create(ctx, "loop.header", func);
+        auto* body = llvm::BasicBlock::Create(ctx, "loop.body", func);
+        auto* exit = llvm::BasicBlock::Create(ctx, "loop.exit", func);
+        auto* out = func->getArg(0);
+
+        llvm::IRBuilder<> builder(entry);
+        builder.CreateBr(header);
+
+        builder.SetInsertPoint(header);
+        auto* i = builder.CreatePHI(i32Ty, 2, "i");
+        i->addIncoming(llvm::ConstantInt::get(i32Ty, 0), entry);
+        auto* sum = builder.CreatePHI(i32Ty, 2, "sum");
+        sum->addIncoming(llvm::ConstantInt::get(i32Ty, 0), entry);
+        auto* cmp = builder.CreateICmpSLT(i, llvm::ConstantInt::get(i32Ty, 2048), "cmp");
+        builder.CreateCondBr(cmp, body, exit);
+
+        builder.SetInsertPoint(body);
+        auto* nextSum = builder.CreateAdd(sum, i, "sum.next");
+        // mid-iteration read of the accumulator: out[i] = sum.next
+        auto* outPtr = builder.CreateGEP(i32Ty, out, {i}, "out.ptr");
+        builder.CreateStore(nextSum, outPtr);
+        auto* inc = builder.CreateAdd(i, llvm::ConstantInt::get(i32Ty, 1), "inc");
+        i->addIncoming(inc, body);
+        sum->addIncoming(nextSum, body);
+        builder.CreateBr(header);
+
+        builder.SetInsertPoint(exit);
+        builder.CreateRetVoid();
+        return func;
+    };
+
+    registerParallelStage(symbols, mapping, "sim", {{"mid_a", makeFn("mid_a")}, {"mid_b", makeFn("mid_b")}}, 2);
+
+    LoopParallelConfig config;
+    config.mode = topo::FeatureMode::Force;
+    config.partitionEnabled = true;
+    config.reductionEnabled = true;
+
+    int result = LoopParallelizePass::run(*module, symbols, mapping, config);
+    EXPECT_GT(result, 0);
+    EXPECT_EQ(module->getFunction("topo_task_spawn"), nullptr); // declined
+    EXPECT_FALSE(llvm::verifyModule(*module, &llvm::errs()));
+}
+
+// Secondary affine induction variable used as an index: for (i,j=5) {
+// out[i] = j; j += 2; }. The worker only remaps the canonical IV, so j
+// would be read as undef. Must decline.
+TEST_F(LoopParallelizePassTest, Phase2SkipsSecondaryInductionVariable) {
+    auto makeFn = [&](const std::string& name) -> llvm::Function* {
+        auto* i32Ty = llvm::Type::getInt32Ty(ctx);
+        auto* ptrTy = llvm::PointerType::get(ctx, 0);
+        auto* funcTy = llvm::FunctionType::get(llvm::Type::getVoidTy(ctx), {ptrTy}, false);
+        auto* func = llvm::Function::Create(funcTy, llvm::Function::ExternalLinkage, name, module.get());
+
+        auto* entry = llvm::BasicBlock::Create(ctx, "entry", func);
+        auto* header = llvm::BasicBlock::Create(ctx, "loop.header", func);
+        auto* body = llvm::BasicBlock::Create(ctx, "loop.body", func);
+        auto* exit = llvm::BasicBlock::Create(ctx, "loop.exit", func);
+        auto* out = func->getArg(0);
+
+        llvm::IRBuilder<> builder(entry);
+        builder.CreateBr(header);
+
+        builder.SetInsertPoint(header);
+        auto* i = builder.CreatePHI(i32Ty, 2, "i");
+        i->addIncoming(llvm::ConstantInt::get(i32Ty, 0), entry);
+        auto* j = builder.CreatePHI(i32Ty, 2, "j");
+        j->addIncoming(llvm::ConstantInt::get(i32Ty, 5), entry);
+        auto* cmp = builder.CreateICmpSLT(i, llvm::ConstantInt::get(i32Ty, 2048), "cmp");
+        builder.CreateCondBr(cmp, body, exit);
+
+        builder.SetInsertPoint(body);
+        // out[i] = j  — j observed mid-iteration as a stored value
+        auto* outPtr = builder.CreateGEP(i32Ty, out, {i}, "out.ptr");
+        builder.CreateStore(j, outPtr);
+        auto* inc = builder.CreateAdd(i, llvm::ConstantInt::get(i32Ty, 1), "inc");
+        auto* jNext = builder.CreateAdd(j, llvm::ConstantInt::get(i32Ty, 2), "j.next");
+        i->addIncoming(inc, body);
+        j->addIncoming(jNext, body);
+        builder.CreateBr(header);
+
+        builder.SetInsertPoint(exit);
+        builder.CreateRetVoid();
+        return func;
+    };
+
+    registerParallelStage(symbols, mapping, "sim", {{"sec_a", makeFn("sec_a")}, {"sec_b", makeFn("sec_b")}}, 2);
+
+    LoopParallelConfig config;
+    config.mode = topo::FeatureMode::Force;
+    config.partitionEnabled = true;
+    config.reductionEnabled = true;
+
+    int result = LoopParallelizePass::run(*module, symbols, mapping, config);
+    EXPECT_GT(result, 0);
+    EXPECT_EQ(module->getFunction("topo_task_spawn"), nullptr); // declined
+    EXPECT_FALSE(llvm::verifyModule(*module, &llvm::errs()));
+}

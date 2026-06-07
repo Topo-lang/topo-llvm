@@ -309,27 +309,47 @@ void shutdown() {
         delete g_pool;
         g_pool = nullptr;
     }
-    // Worker threads exited — clear dangling TLS pointers
-    std::lock_guard<std::mutex> slock(g_samples_mutex);
-    g_tls_registrations.clear();
+    // Each worker's TLS registration removes itself via the
+    // TlsSampleRegistration destructor as the joined thread exits, so there is
+    // nothing to clear here. A blanket clear() would also drop the main
+    // thread's still-live registration while its thread-local `registered`
+    // flag stays true — enrol() would then never re-add it, making the main
+    // thread's cost samples invisible across an init/shutdown cycle.
 }
 
 std::unordered_map<std::string, uint64_t> get_cost_samples() {
-    std::unordered_map<std::string, uint64_t> result;
+    // Accumulate raw totals + counts across every worker's TLS map first,
+    // then compute each function's average exactly once. Averaging an
+    // already-averaged value (the previous "weighted merge") produced an
+    // order-dependent, mathematically wrong result whenever one function
+    // name spanned multiple worker threads (the common case under
+    // round-robin task distribution).
+    struct Accum {
+        uint64_t total_ns = 0;
+        uint64_t count = 0;
+    };
+    std::unordered_map<std::string, Accum> acc;
+
+    // The same g_samples_mutex guards the worker writes in
+    // topo_parallel_cost_end_impl, so iterating each registered map here is
+    // race-free: no worker can rehash/insert into its tls_samples while we
+    // hold this lock.
     std::lock_guard<std::mutex> lock(g_samples_mutex);
     for (auto* tls : g_tls_registrations) {
         for (const auto& [name, sample] : *tls) {
             if (sample.count > 0) {
-                auto it = result.find(name);
-                if (it == result.end()) {
-                    result[name] = sample.total_ns / sample.count;
-                } else {
-                    // Weighted merge: approximate combined average
-                    uint64_t combined_total = sample.total_ns + it->second * sample.count;
-                    it->second = combined_total / (sample.count + 1);
-                }
+                auto& a = acc[name];
+                a.total_ns += sample.total_ns;
+                a.count += sample.count;
             }
         }
+    }
+
+    std::unordered_map<std::string, uint64_t> result;
+    result.reserve(acc.size());
+    for (const auto& [name, a] : acc) {
+        if (a.count > 0)
+            result[name] = a.total_ns / a.count;
     }
     return result;
 }
@@ -338,6 +358,29 @@ void reset_cost_samples() {
     std::lock_guard<std::mutex> lock(g_samples_mutex);
     for (auto* tls : g_tls_registrations) {
         tls->clear();
+    }
+}
+
+// Scoped reset: erase only one pipeline's accumulated samples across every
+// worker's TLS map, leaving all other pipelines' samples intact. Used by the
+// adaptive monitor so re-measuring one specialized pipeline does not wipe the
+// cost history of every sibling pipeline sharing these maps. Clears both the
+// pipeline-level key (`name`) and every per-stage key (`name::<stage>`), which
+// is exactly the subset a global reset would have cleared for this pipeline.
+void reset_cost_samples(const std::string& name) {
+    const std::string stagePrefix = name + "::";
+    std::lock_guard<std::mutex> lock(g_samples_mutex);
+    for (auto* tls : g_tls_registrations) {
+        for (auto it = tls->begin(); it != tls->end();) {
+            const std::string& key = it->first;
+            if (key == name ||
+                (key.size() >= stagePrefix.size() &&
+                 key.compare(0, stagePrefix.size(), stagePrefix) == 0)) {
+                it = tls->erase(it);
+            } else {
+                ++it;
+            }
+        }
     }
 }
 
@@ -483,10 +526,20 @@ extern "C" void topo_parallel_cost_end_impl(const char* func_name) {
             auto duration_ns =
                 static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(end_tp - it->tp).count());
 
-            auto& sample = tls_samples[name];
-            sample.name = name;
-            sample.total_ns += duration_ns;
-            sample.count++;
+            // tls_samples is published into g_tls_registrations and read /
+            // cleared cross-thread by get_cost_samples() / reset_cost_samples()
+            // under g_samples_mutex. The owning worker must take the SAME lock
+            // for its writes — otherwise an insert here can rehash buckets
+            // while an aggregator iterates this map (UB / torn reads), or race
+            // a concurrent clear()/erase(). The critical section is just the
+            // map mutation; tls_pending_begins stays thread-local and unlocked.
+            {
+                std::lock_guard<std::mutex> lock(g_samples_mutex);
+                auto& sample = tls_samples[name];
+                sample.name = name;
+                sample.total_ns += duration_ns;
+                sample.count++;
+            }
 
             tls_pending_begins.erase(std::next(it).base());
             return;

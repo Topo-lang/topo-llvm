@@ -530,6 +530,18 @@ int transformPipelineInlineRewrite(llvm::Function* pipelineFunc,
 
     if (arrayParams.empty()) return 0;
 
+    // The structural rewrite below splits the entry block exactly once and
+    // terminates `entryBB` with a branch into the scatter loop. That is a
+    // once-per-function operation: running it again for a second array
+    // parameter re-fetches the already-terminated `entryBB` and adds a second
+    // terminator, producing malformed IR (verifier failure). A pipeline with
+    // more than one qualifying array parameter (e.g.
+    // `pipeline(array<A,N>& src, array<B,N>& dst)`) is legal input, so rather
+    // than emit invalid IR we conservatively transform only the first
+    // qualifying parameter and decline the rest. A missed optimization on the
+    // remaining params is acceptable; a miscompile is not.
+    if (arrayParams.size() > 1) arrayParams.resize(1);
+
     // --- Collect all AoS GEPs that access struct fields ---
     // The pipeline expects inlining and SROA to have already run (via
     // TopoInlinePass + AlwaysInliner + SROA in PassPipeline), so GEP
@@ -889,6 +901,17 @@ int transformPipeline(llvm::Function* pipelineFunc,
 
     if (arrayParams.empty()) return 0;
 
+    // The per-parameter transform loop below splits the entry block and
+    // terminates `entryBB` with a branch into the scatter loop — a once-per-
+    // function operation. Running it again for a second array parameter
+    // re-terminates the already-branched `entryBB`, producing two terminators
+    // (malformed IR). Compounding this, `allLiveFields` is the union across
+    // all params, so a second param would also allocate columns for the first
+    // param's fields. A pipeline with more than one qualifying array parameter
+    // is legal input, so transform only the first qualifying parameter and
+    // decline the rest rather than emit invalid IR.
+    if (arrayParams.size() > 1) arrayParams.resize(1);
+
     // Collect field usage per node function in the pipeline
     // nodeName -> set of field indices accessed
     std::unordered_map<std::string, std::set<unsigned>> nodeFieldUsage;
@@ -1208,18 +1231,26 @@ int transformPipeline(llvm::Function* pipelineFunc,
             call->eraseFromParent();
         }
 
-        // Emit final gather loop: SoA columns → original AoS array
-        // Find the return block and insert gather before it
+        // Emit final gather loop: SoA columns → original AoS array.
+        // A pipeline can have more than one return (early-return / multiple
+        // exits, common after inlining), and live data lives only in the SoA
+        // columns until gathered back. Emitting the gather (and, in heap mode,
+        // the free) at only the FIRST return would leave the AoS `arg` stale —
+        // and the columns leaked — on every other exit path. So collect ALL
+        // return blocks up front (we cannot iterate the function while we
+        // insert new blocks per return), then emit gather + free before each.
+        std::vector<llvm::ReturnInst*> returns;
         for (auto& BB : *pipelineFunc) {
-            auto* term = BB.getTerminator();
-            if (!term || !llvm::isa<llvm::ReturnInst>(term)) continue;
+            if (auto* ret = llvm::dyn_cast<llvm::ReturnInst>(BB.getTerminator())) returns.push_back(ret);
+        }
 
+        for (auto* ret : returns) {
             auto* gatherFinalBody = llvm::BasicBlock::Create(ctx, "soa.final.gather", pipelineFunc);
             auto* gatherFinalExit = llvm::BasicBlock::Create(ctx, "soa.final.exit", pipelineFunc);
 
             // Split before the return
-            auto* retBlock = term->getParent();
-            auto* newRetBlock = retBlock->splitBasicBlock(term->getIterator(), "soa.ret");
+            auto* retBlock = ret->getParent();
+            auto* newRetBlock = retBlock->splitBasicBlock(ret->getIterator(), "soa.ret");
             retBlock->getTerminator()->eraseFromParent();
 
             builder.SetInsertPoint(retBlock);
@@ -1261,8 +1292,6 @@ int transformPipeline(llvm::Function* pipelineFunc,
             }
 
             builder.CreateBr(newRetBlock);
-
-            break; // Only handle first return block
         }
 
         ++transformed;

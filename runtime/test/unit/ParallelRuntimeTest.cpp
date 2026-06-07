@@ -5,8 +5,16 @@
 #include <atomic>
 #include <chrono>
 #include <cstring>
+#include <string>
 #include <thread>
 #include <vector>
+
+namespace topo::parallel {
+// Scoped cost-sample reset (defined in topo_parallel.cpp). Declared here
+// rather than in the public stable <topo/parallel.h>; it clears only one
+// pipeline's keys so the adaptive monitor does not wipe sibling pipelines.
+void reset_cost_samples(const std::string& name);
+} // namespace topo::parallel
 
 class ParallelRuntimeTest : public ::testing::Test {
 protected:
@@ -199,6 +207,42 @@ TEST_F(ParallelRuntimeTest, ResetCostSamples) {
     topo::parallel::reset_cost_samples();
     auto after = topo::parallel::get_cost_samples();
     EXPECT_TRUE(after.empty());
+}
+
+// Scoped reset: clearing one pipeline's samples must leave every other
+// pipeline's samples intact. Regression for the adaptive monitor bug where
+// a single pipeline specializing called the GLOBAL reset and wiped every
+// sibling pipeline's accumulated cost history. We record samples for two
+// pipelines (plus a per-stage key for one) directly on the calling thread —
+// topo_cost_begin/end run inline and register the caller's TLS map — then
+// scoped-reset only one pipeline and verify the other survives.
+TEST_F(ParallelRuntimeTest, ScopedResetClearsOnlyNamedPipeline) {
+    topo::parallel::reset_cost_samples();
+
+    auto record = [](const char* name) {
+        topo_cost_begin(name);
+        volatile int sum = 0;
+        for (int i = 0; i < 1000; ++i) sum += i;
+        topo_cost_end(name);
+    };
+
+    record("pipeA");
+    record("pipeA::stage1");
+    record("pipeB");
+
+    auto before = topo::parallel::get_cost_samples();
+    ASSERT_GT(before.count("pipeA"), 0u);
+    ASSERT_GT(before.count("pipeA::stage1"), 0u);
+    ASSERT_GT(before.count("pipeB"), 0u);
+
+    // Reset only pipeA — its pipeline-level key and its "pipeA::" stage keys
+    // must vanish; pipeB must be untouched.
+    topo::parallel::reset_cost_samples("pipeA");
+
+    auto after = topo::parallel::get_cost_samples();
+    EXPECT_EQ(after.count("pipeA"), 0u) << "pipeA pipeline key should be cleared";
+    EXPECT_EQ(after.count("pipeA::stage1"), 0u) << "pipeA stage key should be cleared";
+    EXPECT_GT(after.count("pipeB"), 0u) << "pipeB must survive a scoped reset of pipeA";
 }
 
 // ---- Priority-aware spawn ----

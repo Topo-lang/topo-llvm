@@ -309,6 +309,53 @@ TEST(ArenaRuntimeTest, HugeAllocationExhaustsMemoryReturnsNull) {
     topo_arena_destroy(arena);
 }
 
+// Integer-overflow boundary — a size near SIZE_MAX must be rejected with
+// nullptr, NOT silently accepted by a wrapped capacity check. Two wrap
+// paths are exercised:
+//   * fast path: `used + padding + size` wraps to a tiny value <= capacity,
+//     handing back a pointer into the tiny initial block while the caller
+//     believes it owns ~SIZE_MAX bytes (heap buffer overflow on first write);
+//   * new-block path: `size + alignment` wraps to a tiny value, so addBlock
+//     allocates only defaultBlockSize, then `used = padding + size` claims
+//     far more usable space than exists.
+// The overflow guard in topo_arena::alloc must turn both into a clean
+// nullptr. The arena must remain usable afterwards (no partial/poisoned
+// block pushed).
+TEST(ArenaRuntimeTest, SizeNearMaxOverflowReturnsNull) {
+    auto* arena = topo_arena_create(4096);
+    ASSERT_NE(arena, nullptr);
+
+    // Seed a successful allocation so `used > 0` and the fast-path sum
+    // `used + padding + size` is the one that wraps.
+    auto* seed = topo_arena_alloc(arena, 64, 8);
+    ASSERT_NE(seed, nullptr);
+    *static_cast<uint8_t*>(seed) = 0x7E;
+
+    // SIZE_MAX with alignment 16: `size + alignment` wraps to 15, and
+    // `used + padding + size` wraps below capacity — both old wrap paths.
+    constexpr size_t kMax = static_cast<size_t>(-1);
+    EXPECT_EQ(topo_arena_alloc(arena, kMax, 16), nullptr)
+        << "SIZE_MAX alloc must be rejected, not wrapped";
+
+    // SIZE_MAX - 8 with alignment 16: size + alignment = SIZE_MAX + 7 wraps.
+    EXPECT_EQ(topo_arena_alloc(arena, kMax - 8, 16), nullptr)
+        << "near-SIZE_MAX alloc must be rejected, not wrapped";
+
+    // The exact boundary the guard rejects: size > SIZE_MAX - alignment.
+    EXPECT_EQ(topo_arena_alloc(arena, kMax - 15, 16), nullptr)
+        << "size == SIZE_MAX - alignment + 1 must be rejected";
+
+    // Arena must still serve a legitimate allocation, and the seed byte
+    // must be intact (no wrapped write clobbered the block).
+    EXPECT_EQ(*static_cast<uint8_t*>(seed), 0x7E);
+    auto* ok = topo_arena_alloc(arena, 128, 16);
+    ASSERT_NE(ok, nullptr);
+    std::memset(ok, 0x33, 128);
+    EXPECT_EQ(*static_cast<uint8_t*>(seed), 0x7E);
+
+    topo_arena_destroy(arena);
+}
+
 // Differential vs malloc — allocate the same size+alignment from both an
 // arena and malloc, verify the two pointers behave identically for a
 // write-then-read check (alignment, writability, byte-fidelity). Catches

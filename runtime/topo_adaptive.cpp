@@ -12,6 +12,15 @@
 #include <string>
 #include <unordered_map>
 
+namespace topo::parallel {
+// Scoped cost-sample reset, defined in topo_parallel.cpp (linked in
+// transitively via topo-jit-api). Declared here rather than in the public
+// stable <topo/parallel.h> so the adaptive monitor can clear ONLY the
+// pipeline it just specialized instead of every sibling's samples. Resolved
+// at link time against libtopo-parallel.
+void reset_cost_samples(const std::string& name);
+} // namespace topo::parallel
+
 namespace topo::adaptive::internal {
 
 // Definitions for shared state declared in topo_adaptive_internal.h.
@@ -250,8 +259,16 @@ static void monitorLoop() {
                             // Variant switch: AOT → JIT (async path).
                             emitVariantSwitch(entry, "aot", "jit");
 
-                            // Reset cost samples to measure JIT version
-                            topo::parallel::reset_cost_samples();
+                            // Reset cost samples for ONLY this pipeline so we
+                            // re-measure the JIT version cleanly. A global
+                            // reset here would wipe every other registered
+                            // pipeline's accumulated cost history each time any
+                            // one pipeline specializes, corrupting their
+                            // monitoring state (lost baselines, skipped deopt
+                            // re-checks). Pipeline-level cost is keyed by
+                            // pipelineName; per-stage keys ("<pipeline>::<stage>")
+                            // are re-accumulated under VERIFYING.
+                            topo::parallel::reset_cost_samples(entry.pipelineName);
 
                             entry.verifyCount = 0;
                             entry.state = PipelineState::VERIFYING;

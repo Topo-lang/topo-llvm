@@ -265,16 +265,23 @@ bool containsSyncPrimitives(llvm::Loop* loop) {
     return false;
 }
 
-/// Check if a loop has cross-iteration data dependencies that
-/// prevent safe parallel execution. We detect:
-///   1. PHI nodes in the loop header that carry values between iterations
-///      (other than the induction variable)
-///   2. Load-after-store to the same pointer within the loop body where
-///      the address depends on different iterations
+/// Check if a loop has a cross-iteration *scalar* recurrence through a
+/// header PHI that prevents safe partitioning.
 ///
-/// This is a conservative check: it only approves loops where all
-/// recurrences are the induction variable itself.
-bool hasCrossIterationDeps(llvm::Loop* loop, llvm::ScalarEvolution& SE) {
+/// This covers ONLY loop-carried header PHIs other than the canonical
+/// induction variable. Memory-carried recurrences (load-after-store to
+/// overlapping addresses across iterations) are NOT detected here — see
+/// hasCrossIterationMemoryDeps() for that scan; the candidate gate runs
+/// both.
+///
+/// A secondary header PHI is reported as a dependence even when SCEV
+/// classifies it as an affine AddRec: the outliner only materialises the
+/// canonical induction variable and detected reductions in the worker, so
+/// any other loop-carried value would be read as undef per iteration. The
+/// candidate gate may still rescue such a PHI by classifying it as a
+/// reduction (which the worker *does* materialise); everything else is
+/// declined.
+bool hasCrossIterationDeps(llvm::Loop* loop, llvm::ScalarEvolution& /*SE*/) {
     llvm::BasicBlock* header = loop->getHeader();
     llvm::PHINode* inductionPHI = loop->getCanonicalInductionVariable();
 
@@ -282,19 +289,48 @@ bool hasCrossIterationDeps(llvm::Loop* loop, llvm::ScalarEvolution& SE) {
         // The canonical induction variable is safe
         if (&phi == inductionPHI) continue;
 
-        // Check if this PHI is an affine AddRec (recognized by SCEV as
-        // a loop-varying expression with no data deps). AddRec expressions
-        // like {start, +, step} are safe for partitioning because each
-        // iteration's value is computable from the iteration index alone.
-        const llvm::SCEV* scev = SE.getSCEV(&phi);
-        if (auto* addRec = llvm::dyn_cast<llvm::SCEVAddRecExpr>(scev)) {
-            if (addRec->getLoop() == loop && addRec->isAffine()) continue;
-        }
-
-        // Any other loop-carried PHI is a potential cross-iteration dep
+        // Any other loop-carried header PHI is a potential cross-iteration
+        // dep. Affine AddRecs are NOT waved through here: SCEV being able to
+        // describe the PHI does not mean the outliner can reproduce it
+        // per-iteration. A secondary induction variable (e.g. j+=2 used as
+        // an index) is neither the canonical IV nor a reduction, so the
+        // worker would read it as undef. Such a loop is rescued only if the
+        // candidate gate can classify the PHI as a reduction.
         return true;
     }
 
+    return false;
+}
+
+/// Check whether the loop carries a recurrence *through memory* that makes
+/// partitioning across disjoint iteration slices a data race. The outliner
+/// splits [0, N) into contiguous chunks run concurrently; if one chunk's
+/// load observes a location another chunk's store writes, the result is a
+/// race and a wrong value (e.g. a[i] = a[i-1] + b[i]).
+///
+/// SCEV + alias analysis would let us prove independence precisely, but
+/// that machinery is not wired into this pass. We use a sound, conservative
+/// rule instead: a loop that both reads AND writes memory may carry such a
+/// recurrence, so decline it. Store-only loops (the canonical map pattern
+/// arr[i] = f(i)) and read-only loops stay eligible; load+store loops are
+/// left serial. Over-declining costs an optimization, never correctness.
+bool hasCrossIterationMemoryDeps(llvm::Loop* loop) {
+    bool hasLoad = false;
+    bool hasStore = false;
+    for (llvm::BasicBlock* BB : loop->blocks()) {
+        for (llvm::Instruction& I : *BB) {
+            if (llvm::isa<llvm::LoadInst>(&I)) hasLoad = true;
+            else if (llvm::isa<llvm::StoreInst>(&I)) hasStore = true;
+            // A call that may read/write memory is opaque to this scan;
+            // containsSyncPrimitives() handles sync calls, but any other
+            // memory-touching call could read a value a sibling chunk wrote.
+            else if (auto* call = llvm::dyn_cast<llvm::CallBase>(&I)) {
+                if (call->mayReadFromMemory()) hasLoad = true;
+                if (call->mayWriteToMemory()) hasStore = true;
+            }
+            if (hasLoad && hasStore) return true;
+        }
+    }
     return false;
 }
 
@@ -388,6 +424,25 @@ static std::optional<ReductionInfo> detectReduction(llvm::PHINode* phi, llvm::Lo
         rhs = binop->getOperand(0);
     } else {
         return std::nullopt;
+    }
+
+    // Use restriction (mirrors RecurrenceDescriptor::isReductionPHI). The
+    // accumulator must form a *closed* recurrence: the PHI's only in-loop
+    // use is the binop, and the binop's only in-loop use feeds the PHI's
+    // latch incoming value. If anything else inside the loop reads the
+    // partial accumulator (e.g. `sum += a[i]; out[i] = sum;`), per-partition
+    // identity-seeded accumulation would expose a partition-local partial
+    // mid-iteration instead of the global running value — a silent
+    // miscompile. Reject such loops rather than parallelize them.
+    for (llvm::User* u : phi->users()) {
+        auto* ui = llvm::dyn_cast<llvm::Instruction>(u);
+        if (!ui || !loop->contains(ui)) continue; // out-of-loop (LCSSA) is fine
+        if (ui != binop) return std::nullopt;
+    }
+    for (llvm::User* u : binop->users()) {
+        auto* ui = llvm::dyn_cast<llvm::Instruction>(u);
+        if (!ui || !loop->contains(ui)) continue; // out-of-loop (LCSSA) is fine
+        if (ui != phi) return std::nullopt;
     }
 
     ReductionInfo info;
@@ -1055,6 +1110,13 @@ static int partitionLoopsPhase2(llvm::Module& module,
             // Safety: no sync primitives
             if (containsSyncPrimitives(loop)) continue;
 
+            // Safety: no memory-carried recurrence. Partitioning runs
+            // contiguous iteration slices concurrently; a loop that both
+            // reads and writes memory may have one slice load a location
+            // another slice stores (e.g. a[i] = a[i-1] + b[i]), which is a
+            // data race and a wrong result. Decline rather than miscompile.
+            if (hasCrossIterationMemoryDeps(loop)) continue;
+
             // Safety: check cross-iteration dependencies. If reduction
             // detection is enabled, try to classify loop-carried PHIs as
             // reductions before rejecting the loop.
@@ -1069,12 +1131,15 @@ static int partitionLoopsPhase2(llvm::Module& module,
                 for (llvm::PHINode& phi : header->phis()) {
                     if (&phi == inductionPHI) continue;
 
-                    // Affine AddRecs are already safe for partitioning
-                    const llvm::SCEV* scev = SE.getSCEV(&phi);
-                    if (auto* addRec = llvm::dyn_cast<llvm::SCEVAddRecExpr>(scev)) {
-                        if (addRec->getLoop() == loop && addRec->isAffine()) continue;
-                    }
-
+                    // A non-canonical header PHI is rescued ONLY if it is a
+                    // genuine reduction the worker can materialise. An affine
+                    // AddRec (e.g. a secondary induction variable j+=2) is
+                    // NOT treated as safe here: the outliner remaps only the
+                    // canonical IV and detected reductions, so a secondary IV
+                    // would be read as undef in the worker. detectReduction()
+                    // is the only escape hatch — and its use-restriction
+                    // rejects any PHI read mid-iteration (e.g. j used as an
+                    // index), so such loops are correctly declined.
                     auto red = detectReduction(&phi, loop);
                     if (!red) { allReductions = false; break; }
                     loopReductions.push_back(*red);

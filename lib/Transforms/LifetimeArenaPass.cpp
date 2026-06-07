@@ -7,11 +7,14 @@
 #include <llvm/IR/Constants.h>
 #include <llvm/IR/IRBuilder.h>
 #include <llvm/IR/Instructions.h>
+#include <llvm/IR/Intrinsics.h>
 #include <llvm/IR/Module.h>
 #include <llvm/Transforms/Utils/BasicBlockUtils.h>
 #include <llvm/Transforms/Utils/Cloning.h>
 
+#include <algorithm>
 #include <string>
+#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
@@ -159,9 +162,14 @@ bool escapesScope(llvm::Value* allocResult,
                 if (!callee) return true; // indirect call — escapes
 
                 auto calleeName = callee->getName();
-                // free/delete: matched free, safe
+                // free/delete: matched free, safe. Dedup within this walk:
+                // a free is terminal and never enters `visited`, so a single
+                // free reachable through two traversed values (direct +
+                // reloaded-from-alloca, or aliasing bitcast/GEP) would
+                // otherwise be recorded — and later erased — twice.
                 if (isFreeFunction(calleeName)) {
-                    matchedFrees.push_back(call);
+                    if (std::find(matchedFrees.begin(), matchedFrees.end(), call) == matchedFrees.end())
+                        matchedFrees.push_back(call);
                     continue;
                 }
                 // llvm.lifetime/memcpy/memset/memmove intrinsics are safe
@@ -191,6 +199,12 @@ struct ScopeInfo {
     llvm::CallInst* endCall = nullptr;
     std::unordered_set<llvm::Function*> scopeFuncsIR;
     std::vector<AllocSite> safeSites;
+    // free/delete calls reached on the def-use walk of allocations that
+    // were NOT converted (escaping sites). A free in this set is the
+    // genuine deallocation of an allocation the arena does not own, so it
+    // must never be erased even if a converted site also appears to match
+    // it (e.g. via a reassigned alloca slot). Conservative leak-avoidance.
+    std::unordered_set<llvm::CallInst*> escapingFrees;
 };
 
 /// Discover scope boundaries and safe allocation sites.
@@ -272,6 +286,13 @@ std::optional<ScopeInfo> discoverScope(const std::string& groupName,
         if (!escapesScope(site.call, info.scopeFuncsIR, frees)) {
             site.matchedFrees = std::move(frees);
             info.safeSites.push_back(site);
+        } else {
+            // Escaping site: the frees its walk reached belong to an
+            // allocation the arena will NOT take over. Record them so the
+            // erase step never removes a free that keeps a live (non-arena)
+            // allocation honest — even when a converted site shares the
+            // same free through a reassigned alloca slot or alias path.
+            for (auto* f : frees) info.escapingFrees.insert(f);
         }
     }
 
@@ -287,6 +308,7 @@ int applyArenaReplacement(llvm::Module& module,
                           llvm::CallInst* startCall,
                           const std::string& groupName,
                           std::vector<AllocSite>& safeSites,
+                          const std::unordered_set<llvm::CallInst*>& escapingFrees,
                           const LifetimeConfig& config) {
     auto& ctx = module.getContext();
     auto* ptrTy = llvm::PointerType::get(ctx, 0);
@@ -424,21 +446,79 @@ int applyArenaReplacement(llvm::Module& module,
     for (auto* pt : closeInsertPts)
         injectClose(pt);
 
+    // Decide which sites are safe to convert BEFORE mutating anything.
+    //
+    // A free may legitimately be reached by more than one allocation:
+    //   - two converted sites sharing it (reassigned alloca slot, or a
+    //     `cond ? a : b` PHI/select merge) — erasing it once per site is a
+    //     double-erase (use-after-free of the LLVM instruction), and a
+    //     single retained free over an arena pointer is also wrong;
+    //   - a converted site AND a non-converted (escaping) allocation
+    //     sharing the slot — the free dynamically targets either an arena
+    //     pointer or a real heap pointer, so neither erasing (leaks the
+    //     escaping allocation) nor retaining (frees an arena pointer) is
+    //     correct.
+    //
+    // A free is "ambiguous" if it is claimed by more than one safe site or
+    // if it is also the genuine free of an escaping allocation. Converting
+    // an allocation whose matched free is ambiguous cannot be done
+    // correctly, so we DECLINE that site: it stays a real heap allocation
+    // with its real free untouched. A missed arena optimization is
+    // acceptable; a miscompile is not.
+    std::unordered_map<llvm::CallInst*, int> freeClaimCount;
+    for (auto& site : safeSites) {
+        // matchedFrees is deduped per site by escapesScope, so each entry
+        // here is a distinct converted-site claim.
+        for (auto* f : site.matchedFrees) ++freeClaimCount[f];
+    }
+
+    auto siteIsConvertible = [&](const AllocSite& site) {
+        for (auto* f : site.matchedFrees) {
+            if (freeClaimCount[f] != 1) return false; // shared with another site
+            if (escapingFrees.count(f)) return false; // also frees an escaping alloc
+        }
+        return true;
+    };
+
     // Replace allocations and remove frees
     int converted = 0;
+    std::unordered_set<llvm::CallInst*> erasedFrees;
     for (auto& site : safeSites) {
+        if (!siteIsConvertible(site)) continue; // decline — leave heap alloc + free intact
+
         llvm::IRBuilder<> builder(site.call);
         auto* arena = builder.CreateLoad(ptrTy, global);
         auto* alignment = llvm::ConstantInt::get(sizeTy, 16);
 
         llvm::Value* totalSize;
+        llvm::Value* memsetSize = nullptr; // bytes to zero (calloc only)
         if (site.isCalloc) {
             // calloc(count, elemSize) -> arena_alloc(arena, count*elemSize, 16)
+            //
+            // count*elemSize can overflow size_t. C requires calloc to return
+            // NULL on that overflow; lowering with a plain CreateMul instead
+            // wraps to a small product, so the arena hands back a short buffer
+            // while the program believes it owns count*elemSize bytes — a
+            // miscompile (under-allocation -> heap overflow on later writes).
+            // Detect the overflow with llvm.umul.with.overflow and, when it
+            // occurs, request SIZE_MAX (which topo_arena_alloc rejects ->
+            // returns NULL, matching calloc's contract) and zero 0 bytes (so
+            // the trailing memset on the NULL result is a well-defined no-op).
             auto* count = site.call->getArgOperand(0);
             auto* elemSize = site.call->getArgOperand(1);
             if (count->getType() != sizeTy) count = builder.CreateZExt(count, sizeTy);
             if (elemSize->getType() != sizeTy) elemSize = builder.CreateZExt(elemSize, sizeTy);
-            totalSize = builder.CreateMul(count, elemSize);
+
+            auto* umulOvf = llvm::Intrinsic::getOrInsertDeclaration(
+                &module, llvm::Intrinsic::umul_with_overflow, {sizeTy});
+            auto* mulRes = builder.CreateCall(umulOvf, {count, elemSize});
+            auto* product = builder.CreateExtractValue(mulRes, 0);
+            auto* overflow = builder.CreateExtractValue(mulRes, 1);
+
+            auto* sizeMax = llvm::ConstantInt::get(sizeTy, ~uint64_t(0));
+            auto* zero = llvm::ConstantInt::get(sizeTy, 0);
+            totalSize = builder.CreateSelect(overflow, sizeMax, product);
+            memsetSize = builder.CreateSelect(overflow, zero, product);
         } else {
             totalSize = site.size;
             if (totalSize->getType() != sizeTy) totalSize = builder.CreateZExt(totalSize, sizeTy);
@@ -446,16 +526,21 @@ int applyArenaReplacement(llvm::Module& module,
 
         auto* newAlloc = builder.CreateCall(allocFn, {arena, totalSize, alignment});
 
-        // calloc zeroes memory — insert memset
+        // calloc zeroes memory — insert memset (0 bytes when the size
+        // multiply overflowed, so this stays a no-op on the NULL result).
         if (site.isCalloc) {
-            builder.CreateMemSet(newAlloc, builder.getInt8(0), totalSize, llvm::MaybeAlign(16));
+            builder.CreateMemSet(newAlloc, builder.getInt8(0), memsetSize, llvm::MaybeAlign(16));
         }
 
         site.call->replaceAllUsesWith(newAlloc);
         site.call->eraseFromParent();
 
-        // Erase matched free/delete calls
+        // Erase this site's matched free/delete calls. Each is claimed by
+        // exactly this site and frees no escaping allocation (verified by
+        // siteIsConvertible), so erasing once is correct. erasedFrees is a
+        // final belt-and-suspenders guard against any residual aliasing.
         for (auto* freeCall : site.matchedFrees) {
+            if (!erasedFrees.insert(freeCall).second) continue;
             freeCall->eraseFromParent();
         }
 
@@ -481,7 +566,8 @@ int LifetimeArenaPass::run(llvm::Module& module,
         if (!scopeInfo) continue;
 
         converted += applyArenaReplacement(
-            module, scopeInfo->ownerFunc, scopeInfo->startCall, groupName, scopeInfo->safeSites, config);
+            module, scopeInfo->ownerFunc, scopeInfo->startCall, groupName, scopeInfo->safeSites,
+            scopeInfo->escapingFrees, config);
     }
 
     if (converted > 0) {
