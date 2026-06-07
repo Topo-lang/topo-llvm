@@ -449,4 +449,179 @@ TEST_F(DataLayoutPassTest, TwoArrayParamsProduceValidIR) {
         << "two-array-param pipeline produced malformed IR";
 }
 
+// Regression (issue: DataLayoutPass invalid-IR, finding 5): a zero-length
+// array<T,0> must be declined. The scatter/gather loops are do-while shaped —
+// the body at index 0 runs before the `i < N` bound check — so transforming an
+// N==0 array would read/write out of bounds of the size-0 storage (and emit
+// aligned_alloc(64, 0)). isFixedSizeArrayOfStruct now rejects N==0, so the
+// pass must transform nothing and leave the IR valid.
+TEST_F(DataLayoutPassTest, ZeroLengthArrayDeclined) {
+    llvm::LLVMContext ctx;
+    auto module = std::make_unique<llvm::Module>("test_zero_len", ctx);
+    auto* floatTy = llvm::Type::getFloatTy(ctx);
+    auto* i32Ty = llvm::Type::getInt32Ty(ctx);
+    auto* voidTy = llvm::Type::getVoidTy(ctx);
+    auto* ptrTy = llvm::PointerType::get(ctx, 0);
+
+    auto* particleSty = llvm::StructType::create(ctx, {floatTy, floatTy, floatTy, i32Ty}, "struct.Particle");
+    // N == 0: the boundary case that previously caused OOB scatter/gather.
+    auto* arrTy = llvm::ArrayType::get(particleSty, 0);
+    auto* wrapperSty = llvm::StructType::create(ctx, {arrTy}, "struct.topo::array");
+    auto* zero = llvm::ConstantInt::get(i32Ty, 0);
+
+    auto* nodeFuncTy = llvm::FunctionType::get(voidTy, {ptrTy}, false);
+    auto* nodeFunc = llvm::Function::Create(nodeFuncTy, llvm::GlobalValue::ExternalLinkage, "node", *module);
+    {
+        auto* bb = llvm::BasicBlock::Create(ctx, "entry", nodeFunc);
+        llvm::IRBuilder<> b(bb);
+        auto* arg = nodeFunc->getArg(0);
+        auto* gep0 = b.CreateGEP(wrapperSty, arg, {zero, zero, zero, zero}, "x");
+        b.CreateLoad(floatTy, gep0);
+        b.CreateRetVoid();
+    }
+
+    auto* pipelineFuncTy = llvm::FunctionType::get(i32Ty, {ptrTy}, false);
+    auto* pipelineFunc =
+        llvm::Function::Create(pipelineFuncTy, llvm::GlobalValue::ExternalLinkage, "pipeline", *module);
+    {
+        auto* bb = llvm::BasicBlock::Create(ctx, "entry", pipelineFunc);
+        llvm::IRBuilder<> b(bb);
+        b.CreateCall(nodeFunc, {pipelineFunc->getArg(0)});
+        b.CreateRet(zero);
+    }
+
+    SymbolTable symbols;
+    ClassSymbol particleClass;
+    particleClass.qualifiedName = "physics::Particle";
+    particleClass.simpleName = "Particle";
+    particleClass.visibility = Visibility::Public;
+    particleClass.memberVars = {{"x", {}, false, {}}, {"y", {}, false, {}}, {"z", {}, false, {}}, {"id", {}, false, {}}};
+    symbols.addClassSymbol(particleClass);
+
+    FunctionSymbol nodeSym;
+    nodeSym.qualifiedName = "physics::node";
+    nodeSym.simpleName = "node";
+    nodeSym.visibility = Visibility::Protected;
+    symbols.addFunction(nodeSym);
+
+    LogicBlockEntry lb;
+    lb.qualifiedName = "physics::simulate";
+    lb.simpleName = "simulate";
+    lb.isPipeline = true;
+    lb.calledFunctions = {"physics::node"};
+    PipelineAnalysis analysis;
+    analysis.stages = {{"node", 1}};
+    lb.pipelineAnalysis = analysis;
+    symbols.addLogicBlock(lb);
+
+    SymbolMapping mapping;
+    mapping.matched["physics::simulate"] = pipelineFunc;
+    mapping.matched["physics::node"] = nodeFunc;
+
+    DataLayoutConfig config;
+    config.mode = FeatureMode::Force;
+
+    int result = DataLayoutPass::run(*module, symbols, mapping, config);
+    EXPECT_EQ(result, 0) << "zero-length array<T,0> must be declined";
+    EXPECT_FALSE(llvm::verifyModule(*module, nullptr)) << "declined N==0 left invalid IR";
+
+    // No aligned_alloc(64, 0) / scatter loop should have been emitted.
+    bool sawAllocaCol = false;
+    for (auto& BB : *pipelineFunc)
+        for (auto& I : BB)
+            if (llvm::isa<llvm::AllocaInst>(&I)) sawAllocaCol = true;
+    EXPECT_FALSE(sawAllocaCol) << "declined N==0 still allocated SoA columns";
+}
+
+// Regression (issue: DataLayoutPass invalid-IR, finding 6): a pipeline whose
+// body has NO ReturnInst (ends in `unreachable` / noreturn) must be declined.
+// The SoA columns are allocated at entry and the gather + free are emitted
+// only before each return — with no return there is no free site, so the
+// heap columns would leak every invocation. The fix bails before allocating
+// columns, so the pipeline body must be left untouched and verify cleanly.
+TEST_F(DataLayoutPassTest, NoReturnPipelineDeclined) {
+    llvm::LLVMContext ctx;
+    auto module = std::make_unique<llvm::Module>("test_no_return", ctx);
+    auto* floatTy = llvm::Type::getFloatTy(ctx);
+    auto* i32Ty = llvm::Type::getInt32Ty(ctx);
+    auto* voidTy = llvm::Type::getVoidTy(ctx);
+    auto* ptrTy = llvm::PointerType::get(ctx, 0);
+
+    constexpr uint64_t N = 128;
+    auto* particleSty = llvm::StructType::create(ctx, {floatTy, floatTy, floatTy, i32Ty}, "struct.Particle");
+    auto* arrTy = llvm::ArrayType::get(particleSty, N);
+    auto* wrapperSty = llvm::StructType::create(ctx, {arrTy}, "struct.topo::array");
+    auto* zero = llvm::ConstantInt::get(i32Ty, 0);
+
+    auto* nodeFuncTy = llvm::FunctionType::get(voidTy, {ptrTy}, false);
+    auto* nodeFunc = llvm::Function::Create(nodeFuncTy, llvm::GlobalValue::ExternalLinkage, "node", *module);
+    {
+        auto* bb = llvm::BasicBlock::Create(ctx, "entry", nodeFunc);
+        llvm::IRBuilder<> b(bb);
+        auto* arg = nodeFunc->getArg(0);
+        auto* gep0 = b.CreateGEP(wrapperSty, arg, {zero, zero, zero, zero}, "x");
+        b.CreateLoad(floatTy, gep0);
+        b.CreateRetVoid();
+    }
+
+    // pipeline(ptr): calls node, then `unreachable` — NO ReturnInst.
+    auto* pipelineFuncTy = llvm::FunctionType::get(voidTy, {ptrTy}, false);
+    auto* pipelineFunc =
+        llvm::Function::Create(pipelineFuncTy, llvm::GlobalValue::ExternalLinkage, "pipeline", *module);
+    {
+        auto* bb = llvm::BasicBlock::Create(ctx, "entry", pipelineFunc);
+        llvm::IRBuilder<> b(bb);
+        b.CreateCall(nodeFunc, {pipelineFunc->getArg(0)});
+        b.CreateUnreachable();
+    }
+
+    SymbolTable symbols;
+    ClassSymbol particleClass;
+    particleClass.qualifiedName = "physics::Particle";
+    particleClass.simpleName = "Particle";
+    particleClass.visibility = Visibility::Public;
+    particleClass.memberVars = {{"x", {}, false, {}}, {"y", {}, false, {}}, {"z", {}, false, {}}, {"id", {}, false, {}}};
+    symbols.addClassSymbol(particleClass);
+
+    FunctionSymbol nodeSym;
+    nodeSym.qualifiedName = "physics::node";
+    nodeSym.simpleName = "node";
+    nodeSym.visibility = Visibility::Protected;
+    symbols.addFunction(nodeSym);
+
+    LogicBlockEntry lb;
+    lb.qualifiedName = "physics::simulate";
+    lb.simpleName = "simulate";
+    lb.isPipeline = true;
+    lb.calledFunctions = {"physics::node"};
+    PipelineAnalysis analysis;
+    analysis.stages = {{"node", 1}};
+    lb.pipelineAnalysis = analysis;
+    symbols.addLogicBlock(lb);
+
+    SymbolMapping mapping;
+    mapping.matched["physics::simulate"] = pipelineFunc;
+    mapping.matched["physics::node"] = nodeFunc;
+
+    DataLayoutConfig config;
+    config.mode = FeatureMode::Force;
+
+    int result = DataLayoutPass::run(*module, symbols, mapping, config);
+    EXPECT_EQ(result, 0) << "no-return pipeline must be declined (would leak columns)";
+    EXPECT_FALSE(llvm::verifyModule(*module, nullptr)) << "declined no-return left invalid IR";
+
+    // No SoA column allocation should have been emitted.
+    bool sawColAlloc = false;
+    for (auto& BB : *pipelineFunc) {
+        for (auto& I : BB) {
+            if (llvm::isa<llvm::AllocaInst>(&I)) sawColAlloc = true;
+            if (auto* call = llvm::dyn_cast<llvm::CallInst>(&I)) {
+                if (auto* callee = call->getCalledFunction())
+                    if (callee->getName() == "aligned_alloc") sawColAlloc = true;
+            }
+        }
+    }
+    EXPECT_FALSE(sawColAlloc) << "declined no-return still allocated SoA columns";
+}
+
 } // namespace

@@ -798,3 +798,125 @@ TEST_F(LoopParallelizePassTest, Phase2SkipsSecondaryInductionVariable) {
     EXPECT_EQ(module->getFunction("topo_task_spawn"), nullptr); // declined
     EXPECT_FALSE(llvm::verifyModule(*module, &llvm::errs()));
 }
+
+// Indirect / opaque call inside the loop: the callee is unknown, so it may
+// take a lock or perform ordered I/O the name-prefix sync scan cannot see.
+// containsSyncPrimitives() must treat an unknown callee as a hazard and the
+// loop must be declined rather than partitioned.
+TEST_F(LoopParallelizePassTest, Phase2SkipsLoopWithIndirectCall) {
+    auto makeFn = [&](const std::string& name) -> llvm::Function* {
+        auto* i32Ty = llvm::Type::getInt32Ty(ctx);
+        auto* ptrTy = llvm::PointerType::get(ctx, 0);
+        // 2nd arg is a function pointer we call indirectly each iteration.
+        auto* funcTy = llvm::FunctionType::get(llvm::Type::getVoidTy(ctx), {ptrTy, ptrTy}, false);
+        auto* func = llvm::Function::Create(funcTy, llvm::Function::ExternalLinkage, name, module.get());
+
+        auto* entry = llvm::BasicBlock::Create(ctx, "entry", func);
+        auto* header = llvm::BasicBlock::Create(ctx, "loop.header", func);
+        auto* body = llvm::BasicBlock::Create(ctx, "loop.body", func);
+        auto* exit = llvm::BasicBlock::Create(ctx, "loop.exit", func);
+        auto* fnPtr = func->getArg(1);
+
+        // Signature of the callee invoked indirectly: void(i32).
+        auto* calleeTy = llvm::FunctionType::get(llvm::Type::getVoidTy(ctx), {i32Ty}, false);
+
+        llvm::IRBuilder<> builder(entry);
+        builder.CreateBr(header);
+
+        builder.SetInsertPoint(header);
+        auto* i = builder.CreatePHI(i32Ty, 2, "i");
+        i->addIncoming(llvm::ConstantInt::get(i32Ty, 0), entry);
+        auto* cmp = builder.CreateICmpSLT(i, llvm::ConstantInt::get(i32Ty, 2048), "cmp");
+        builder.CreateCondBr(cmp, body, exit);
+
+        builder.SetInsertPoint(body);
+        // Indirect call through the function-pointer argument: callee unknown.
+        builder.CreateCall(calleeTy, fnPtr, {i});
+        auto* inc = builder.CreateAdd(i, llvm::ConstantInt::get(i32Ty, 1), "inc");
+        i->addIncoming(inc, body);
+        builder.CreateBr(header);
+
+        builder.SetInsertPoint(exit);
+        builder.CreateRetVoid();
+        return func;
+    };
+
+    registerParallelStage(symbols, mapping, "sim", {{"ind_a", makeFn("ind_a")}, {"ind_b", makeFn("ind_b")}}, 2);
+
+    LoopParallelConfig config;
+    config.mode = topo::FeatureMode::Force;
+    config.partitionEnabled = true;
+
+    int result = LoopParallelizePass::run(*module, symbols, mapping, config);
+    EXPECT_GT(result, 0); // Step 1 annotation still applies
+    EXPECT_EQ(module->getFunction("topo_task_spawn"), nullptr); // declined
+    EXPECT_FALSE(llvm::verifyModule(*module, &llvm::errs()));
+}
+
+// Regression for the exit-PHI-cast-after-terminator bug. When a reduction is
+// present AND a separate non-i64 integer LCSSA exit PHI carries a
+// non-reduction value, the exit-PHI fixup must cast the i64 trip count to the
+// PHI's type *before* the exit predecessor's terminator. Inserting it after
+// the terminator (the old behaviour) produced IR the verifier rejects. Here:
+//   for (i32 i = 0; i < 2048; ++i) sum += i;   // sum is an i32 reduction
+//   exit:  i.lcssa = phi i32 [i, header]       // non-reduction i32 exit PHI
+// The pass must partition the reduction AND emit verifier-clean IR.
+TEST_F(LoopParallelizePassTest, Phase2ReductionWithNonI64ExitPhiEmitsValidIR) {
+    auto makeFn = [&](const std::string& name) -> llvm::Function* {
+        auto* i32Ty = llvm::Type::getInt32Ty(ctx);
+        auto* funcTy = llvm::FunctionType::get(i32Ty, {}, false);
+        auto* func = llvm::Function::Create(funcTy, llvm::Function::ExternalLinkage, name, module.get());
+
+        auto* entry = llvm::BasicBlock::Create(ctx, "entry", func);
+        auto* header = llvm::BasicBlock::Create(ctx, "loop.header", func);
+        auto* body = llvm::BasicBlock::Create(ctx, "loop.body", func);
+        auto* exit = llvm::BasicBlock::Create(ctx, "loop.exit", func);
+
+        llvm::IRBuilder<> builder(entry);
+        builder.CreateBr(header);
+
+        builder.SetInsertPoint(header);
+        // Canonical i32 induction variable {0,+,1}.
+        auto* i = builder.CreatePHI(i32Ty, 2, "i");
+        i->addIncoming(llvm::ConstantInt::get(i32Ty, 0), entry);
+        // i32 reduction accumulator: sum += i (closed recurrence, no other use).
+        auto* sum = builder.CreatePHI(i32Ty, 2, "sum");
+        sum->addIncoming(llvm::ConstantInt::get(i32Ty, 0), entry);
+        auto* cmp = builder.CreateICmpSLT(i, llvm::ConstantInt::get(i32Ty, 2048), "cmp");
+        builder.CreateCondBr(cmp, body, exit);
+
+        builder.SetInsertPoint(body);
+        auto* nextSum = builder.CreateAdd(sum, i, "sum.next");
+        auto* inc = builder.CreateAdd(i, llvm::ConstantInt::get(i32Ty, 1), "inc");
+        i->addIncoming(inc, body);
+        sum->addIncoming(nextSum, body);
+        builder.CreateBr(header);
+
+        builder.SetInsertPoint(exit);
+        // Two LCSSA exit PHIs: the reduction result (i32) and the induction
+        // variable (i32, non-reduction). The latter drives the buggy
+        // non-i64 IntCast path; without the fix the cast lands after exit's
+        // terminator.
+        auto* sumOut = builder.CreatePHI(i32Ty, 1, "sum.lcssa");
+        sumOut->addIncoming(sum, header);
+        auto* iOut = builder.CreatePHI(i32Ty, 1, "i.lcssa");
+        iOut->addIncoming(i, header);
+        auto* ret = builder.CreateAdd(sumOut, iOut, "ret");
+        builder.CreateRet(ret);
+        return func;
+    };
+
+    registerParallelStage(symbols, mapping, "sim", {{"red_a", makeFn("red_a")}, {"red_b", makeFn("red_b")}}, 2);
+
+    LoopParallelConfig config;
+    config.mode = topo::FeatureMode::Force;
+    config.partitionEnabled = true;
+    config.reductionEnabled = true;
+
+    int result = LoopParallelizePass::run(*module, symbols, mapping, config);
+    EXPECT_GT(result, 0);
+    // The reduction loop IS partitioned (Step C combine is implemented).
+    EXPECT_NE(module->getFunction("topo_task_spawn"), nullptr);
+    // The cast must sit before the terminator -> the module verifies clean.
+    EXPECT_FALSE(llvm::verifyModule(*module, &llvm::errs()));
+}

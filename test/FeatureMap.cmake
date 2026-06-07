@@ -143,7 +143,7 @@ set_tests_properties(
     LoopParallelizePassTest.SingleStageFunctionSkipped
     LoopParallelizePassTest.ExcludeListSkipsFunctions
     LoopParallelizePassTest.AccessGroupMetadataPresent
-    LoopParallelizePassTest.VectorizeEnableMetadataPresent
+    LoopParallelizePassTest.VectorizeEnableMetadataAbsent
     PROPERTIES LABELS "toolchain;ir;loop_parallel")
 
 # Observability — IR pass

@@ -72,7 +72,16 @@ std::optional<ArrayOfStructInfo> isFixedSizeArrayOfStruct(llvm::StructType* sty)
     auto* elemTy = llvm::dyn_cast<llvm::StructType>(arrTy->getElementType());
     if (!elemTy) return std::nullopt;
 
-    return ArrayOfStructInfo{sty, elemTy, arrTy->getNumElements()};
+    // Decline N==0. The scatter/gather loops are do-while shaped — the body
+    // (load/store at index 0) runs BEFORE the `ICmpULT(next, N)` bound check —
+    // so an N==0 array would execute the body once at index 0, reading/writing
+    // out of bounds of the size-0 AoS storage and the size-0 column (and
+    // emitting aligned_alloc(64, 0)). A zero-length container has nothing to
+    // transform anyway, so bail rather than emit OOB IR.
+    uint64_t N = arrTy->getNumElements();
+    if (N == 0) return std::nullopt;
+
+    return ArrayOfStructInfo{sty, elemTy, N};
 }
 
 // ============================================================================
@@ -139,14 +148,21 @@ std::optional<std::pair<std::string, uint64_t>> parseArraySignature(llvm::String
     if (elemPart.empty()) return std::nullopt;
 
     // N: leading decimal digits (Itanium appends a `ul`/`l` literal suffix).
+    // Take the leading-digit run, then parse it with overflow detection.
+    // `nPart` comes from a demangled (attacker-influenceable) string, so a
+    // >20-digit literal must NOT silently wrap a uint64_t to a small/garbage
+    // N — that would size the synthetic array type and the columns far below
+    // the real element count, yielding an undersized allocation.
+    size_t digits = 0;
+    while (digits < nPart.size() && nPart[digits] >= '0' && nPart[digits] <= '9') ++digits;
+    if (digits == 0) return std::nullopt;
+    llvm::StringRef digitRun = nPart.substr(0, digits);
+
     uint64_t N = 0;
-    bool any = false;
-    for (char c : nPart) {
-        if (c < '0' || c > '9') break;
-        N = N * 10 + static_cast<uint64_t>(c - '0');
-        any = true;
-    }
-    if (!any || N == 0) return std::nullopt;
+    // getAsInteger returns true on failure, which here includes overflow of the
+    // uint64_t result type — decline the candidate rather than under-size it.
+    if (digitRun.getAsInteger(10, N)) return std::nullopt;
+    if (N == 0) return std::nullopt;
 
     return std::make_pair(elemPart.str(), N);
 }
@@ -178,10 +194,32 @@ llvm::StructType* findElementStructByName(llvm::Module& module, llvm::StringRef 
 
 /// Recover elided topo::array<Elem,N> candidates from demangled function names.
 /// Each distinct (Elem, N) yields one synthetic-wrapper ArrayOfStructInfo.
+///
+/// The synthetic wrapper is a named identified StructType that persists in the
+/// module/context type list. Without reuse, repeated invocations on the same
+/// long-lived module would create a fresh `struct.topo::array.recovered` per
+/// (Elem, N) on every call (named structs auto-rename to `.recovered.0`,
+/// `.recovered.1`, ...), accumulating duplicate synthetic types and polluting
+/// getIdentifiedStructTypes(). To cap this at one wrapper per (Elem, N) without
+/// any cross-call dangling-pointer hazard, the cache is the module's OWN
+/// identified-struct list: before synthesizing, look for an existing
+/// `{[N x Elem]}` recovered wrapper from a prior call and reuse it. Anything in
+/// that list is live for as long as the module is, so the reused pointer can
+/// never dangle.
+llvm::StructType* getOrCreateRecoveredWrapper(llvm::Module& module, llvm::StructType* elemTy, uint64_t N) {
+    auto* arrTy = llvm::ArrayType::get(elemTy, N);
+    for (auto* sty : module.getIdentifiedStructTypes()) {
+        if (!sty->hasName()) continue;
+        if (!sty->getName().contains("topo::array.recovered")) continue;
+        if (sty->getNumElements() != 1) continue;
+        if (sty->getElementType(0) == arrTy) return sty; // exact {[N x Elem]} match
+    }
+    return llvm::StructType::create(module.getContext(), {arrTy}, "struct.topo::array.recovered");
+}
+
 std::vector<ArrayOfStructInfo> recoverElidedArrayTypes(llvm::Module& module) {
     std::vector<ArrayOfStructInfo> recovered;
     std::set<std::pair<llvm::StructType*, uint64_t>> seen;
-    auto& ctx = module.getContext();
 
     for (auto& func : module) {
         if (!func.hasName()) continue;
@@ -191,8 +229,7 @@ std::vector<ArrayOfStructInfo> recoverElidedArrayTypes(llvm::Module& module) {
         if (!elemTy) continue;
         if (!seen.insert({elemTy, sig->second}).second) continue;
 
-        auto* arrTy = llvm::ArrayType::get(elemTy, sig->second);
-        auto* wrapper = llvm::StructType::create(ctx, {arrTy}, "struct.topo::array.recovered");
+        auto* wrapper = getOrCreateRecoveredWrapper(module, elemTy, sig->second);
         recovered.push_back(ArrayOfStructInfo{wrapper, elemTy, sig->second});
     }
     return recovered;
@@ -541,6 +578,23 @@ int transformPipelineInlineRewrite(llvm::Function* pipelineFunc,
     // qualifying parameter and decline the rest. A missed optimization on the
     // remaining params is acceptable; a miscompile is not.
     if (arrayParams.size() > 1) arrayParams.resize(1);
+
+    // The SoA columns are heap-allocated (aligned_alloc) at entry and freed
+    // only before each ReturnInst. A function with NO ReturnInst — ending in
+    // `unreachable`, an infinite loop, or a `noreturn` tail call — gets no
+    // free site, leaking 64B-aligned columns per invocation. Decline the
+    // transform when there is no return so the columns are never allocated;
+    // skipping the rewrite is always sound.
+    {
+        bool hasReturn = false;
+        for (auto& BB : *pipelineFunc) {
+            if (llvm::dyn_cast_or_null<llvm::ReturnInst>(BB.getTerminator())) {
+                hasReturn = true;
+                break;
+            }
+        }
+        if (!hasReturn) return 0;
+    }
 
     // --- Collect all AoS GEPs that access struct fields ---
     // The pipeline expects inlining and SROA to have already run (via
@@ -948,6 +1002,21 @@ int transformPipeline(llvm::Function* pipelineFunc,
 
     if (allLiveFields.empty()) return 0;
 
+    // The cleanup (final SoA->AoS gather, and in heap mode the free) is emitted
+    // before every ReturnInst. A function with NO ReturnInst — one that ends in
+    // `unreachable`, an infinite loop, or a `noreturn` tail call — gets no
+    // cleanup site, so the heap columns allocated at entry would leak on every
+    // invocation. Decline the transform entirely when there is no return: it is
+    // always sound to skip, and skipping means the columns are never allocated.
+    bool hasReturn = false;
+    for (auto& BB : *pipelineFunc) {
+        if (llvm::dyn_cast_or_null<llvm::ReturnInst>(BB.getTerminator())) {
+            hasReturn = true;
+            break;
+        }
+    }
+    if (!hasReturn) return 0;
+
     // Now transform: for each qualifying array parameter, insert SoA
     // scatter/gather around the pipeline body.
     for (const auto& ap : arrayParams) {
@@ -1118,11 +1187,19 @@ int transformPipeline(llvm::Function* pipelineFunc,
             const auto& neededFields = usageIt->second;
             if (neededFields.empty()) continue;
 
+            // Create the temp AoS array in the function's entry block, not at
+            // the call site. The call can sit inside a loop region of the
+            // pipeline body; a non-entry alloca reached in a loop re-executes
+            // each iteration and is never auto-reclaimed until function return,
+            // so the stack grows unbounded — and with `[N x Elem]` (N up to
+            // 262144) even one such object risks stack overflow. An entry-block
+            // alloca executes once and is stack-stable.
+            llvm::IRBuilder<> entryBuilder(&pipelineFunc->getEntryBlock(),
+                                           pipelineFunc->getEntryBlock().getFirstInsertionPt());
+            auto* tempAlloca = entryBuilder.CreateAlloca(wrapperSty, nullptr, "soa.temp");
+
             // Insert gather/scatter around this call
             builder.SetInsertPoint(call);
-
-            // Create temp AoS array
-            auto* tempAlloca = builder.CreateAlloca(wrapperSty, nullptr, "soa.temp");
 
             // Gather loop: SoA columns → temp AoS (only needed fields)
             auto* gatherBody = llvm::BasicBlock::Create(ctx, "soa.gather." + nodeName, pipelineFunc);
@@ -1481,7 +1558,18 @@ int DataLayoutPass::runGlobalImpl(llvm::Module& module) {
                         if (!fieldIdxVal) continue;
                         unsigned fieldIdx = fieldIdxVal->getZExtValue();
                         if (fieldIdx >= elemSty->getNumElements()) continue;
+                        // Root-strip the base pointer to the underlying allocation,
+                        // exactly as patterns (b)/(c) below do. This path
+                        // reinterprets the allocation in place, so every pattern
+                        // must anchor the SoA struct at the SAME base address. If a
+                        // layered GEP feeds this wrapper GEP (e.g. the wrapper is a
+                        // member reached through an outer GEP), taking the operand
+                        // raw would anchor the SoA struct one indirection too deep,
+                        // disagreeing with the stripped base patterns (b)/(c)
+                        // compute for the same allocation.
                         auto* basePtr = gep->getPointerOperand();
+                        while (auto* bgep = llvm::dyn_cast<llvm::GetElementPtrInst>(basePtr))
+                            basePtr = bgep->getPointerOperand();
                         fieldGEPs.push_back({gep, fieldIdx, gep->getOperand(3), basePtr});
                         continue;
                     }

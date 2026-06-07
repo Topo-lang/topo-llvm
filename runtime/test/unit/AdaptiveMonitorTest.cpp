@@ -380,6 +380,44 @@ TEST_F(AdaptiveMonitorTest, ForceSpecializeBytesRespectsMaxVersions) {
     EXPECT_EQ(topo::adaptive::stats().specializations, 1u);
     EXPECT_EQ(jitPtr, firstPtr);
 }
+
+// Regression: re-specializing an already-ACTIVE pipeline must NOT add a second
+// live entry to active_jit. With max_versions > 1, two force_specialize calls
+// on the same pipeline produce two specializations but only ONE live JIT
+// pointer, so active_jit must read 1 (not 2). Pre-fix commitSpecialization
+// incremented g_activeJit unconditionally, permanently over-counting the value
+// topo-profile reports.
+TEST_F(AdaptiveMonitorTest, ForceSpecializeTwiceDoesNotOverCountActiveJit) {
+    topo::adaptive::Config cfg;
+    cfg.max_versions = 2; // allow a second specialization
+    topo::adaptive::init(cfg);
+
+    void* jitPtr = nullptr;
+    topo_adaptive_register(
+        "_ZN8topotest8pipelineEi", "topotest::pipeline",
+        reinterpret_cast<void**>(&jitPtr), 1000);
+
+    // First specialization: inactive -> active, active_jit goes 0 -> 1.
+    topo::adaptive::force_specialize_bytes(
+        "topotest::pipeline",
+        kTestPipelineBitcode, kTestPipelineBitcodeSize, "");
+    {
+        auto s = topo::adaptive::stats();
+        EXPECT_EQ(s.specializations, 1u);
+        EXPECT_EQ(s.active_jit, 1u);
+    }
+
+    // Second specialization on the now-ACTIVE pipeline: a new version, but
+    // still a single live JIT pointer. active_jit must stay 1.
+    topo::adaptive::force_specialize_bytes(
+        "topotest::pipeline",
+        kTestPipelineBitcode, kTestPipelineBitcodeSize, "");
+    {
+        auto s = topo::adaptive::stats();
+        EXPECT_EQ(s.specializations, 2u);
+        EXPECT_EQ(s.active_jit, 1u) << "active_jit over-counted on re-specialize";
+    }
+}
 #endif  // TOPO_TEST_HAS_LLVM_BITCODE
 
 // ---- Stats snapshot during active monitoring ----

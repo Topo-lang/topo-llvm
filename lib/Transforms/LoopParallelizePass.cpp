@@ -208,9 +208,11 @@ llvm::Constant* getOrCreateGlobalString(llvm::Module& module, const std::string&
     return llvm::ConstantExpr::getPointerCast(gv, llvm::PointerType::getUnqual(ctx));
 }
 
-/// Check if a loop contains calls to known synchronization primitives
-/// (mutex lock/unlock, atomic fences, thread barriers, etc.).
-/// Such loops are unsafe to partition.
+/// Check if a loop contains a cross-iteration ordering hazard that makes it
+/// unsafe to partition: a call to a known synchronization primitive (mutex
+/// lock/unlock, atomic fences, thread barriers, etc.), an atomic instruction,
+/// or an indirect/opaque call whose effects we cannot inspect. Returns true
+/// (decline) for any of these.
 bool containsSyncPrimitives(llvm::Loop* loop) {
     static const char* syncPrefixes[] = {
         "pthread_mutex",
@@ -249,8 +251,14 @@ bool containsSyncPrimitives(llvm::Loop* loop) {
 
             auto* callee = call->getCalledFunction();
             if (!callee)
-                continue; // Indirect call: conservatively unsafe
-                          // is handled below by the "has side effects" check
+                // Indirect / opaque call: the callee is unknown, so it may
+                // internally take a lock, perform ordered I/O, or otherwise
+                // carry a cross-iteration ordering hazard we cannot see. The
+                // name-prefix scan below can only catch *direct* calls to
+                // known sync functions, so an unknown callee must be treated
+                // as a hazard and the loop declined. (Bailing here is always
+                // safe — we only ever lose an optimization, never correctness.)
+                return true;
 
             llvm::StringRef name = callee->getName();
 
@@ -1013,8 +1021,16 @@ bool partitionLoop(llvm::Module& module,
                 replacement = llvm::UndefValue::get(phi.getType());
                 if (phi.getType() == i64Ty)
                     replacement = tripCount;
-                else if (phi.getType()->isIntegerTy())
+                else if (phi.getType()->isIntegerTy()) {
+                    // The builder's insert point currently sits at the END of
+                    // exitPred, which already has its branch-to-exitBlock
+                    // terminator (created above for both the reduction combine
+                    // and the no-reduction path). Inserting the cast here would
+                    // place it AFTER the terminator -> invalid IR the verifier
+                    // rejects. Position it before exitPred's terminator instead.
+                    builder.SetInsertPoint(exitPred->getTerminator());
                     replacement = builder.CreateIntCast(tripCount, phi.getType(), true);
+                }
             }
             phi.addIncoming(replacement, exitPred);
         }

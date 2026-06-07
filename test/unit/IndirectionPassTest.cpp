@@ -3,9 +3,12 @@
 #include "topo/Sema/SymbolTable.h"
 
 #include <llvm/IR/Function.h>
+#include <llvm/IR/Instructions.h>
 #include <llvm/IR/IRBuilder.h>
 #include <llvm/IR/LLVMContext.h>
 #include <llvm/IR/Module.h>
+#include <llvm/IR/Verifier.h>
+#include <llvm/Support/raw_ostream.h>
 #include <llvm/Support/TargetSelect.h>
 
 #include <gtest/gtest.h>
@@ -684,6 +687,13 @@ TEST_F(IndirectionPassTest, Vector_NoResize) {
     llvm::IRBuilder<> builder(bb);
     auto* alloca = builder.CreateAlloca(vecTy, nullptr, "vec");
 
+    // Initialize the begin pointer (field 0) so the span lowering reads a
+    // constructed value rather than uninitialized stack. A backing buffer
+    // alloca stands in for the heap allocation.
+    auto* storage = builder.CreateAlloca(i32Ty, nullptr, "storage");
+    auto* beginGep = builder.CreateStructGEP(vecTy, alloca, 0, "vec.begin.init");
+    builder.CreateStore(storage, beginGep);
+
     // Only read from field 0 (begin pointer) -- no resize
     auto* gep = builder.CreateStructGEP(vecTy, alloca, 0);
     auto* load = builder.CreateLoad(ptrTy, gep);
@@ -754,6 +764,14 @@ TEST_F(IndirectionPassTest, Vector_NonnullAttr) {
     auto* bb = llvm::BasicBlock::Create(ctx, "entry", func);
     llvm::IRBuilder<> builder(bb);
     auto* alloca = builder.CreateAlloca(vecTy, nullptr, "vec");
+
+    // Initialize the begin pointer (field 0) with a provably non-null value
+    // (a backing-buffer alloca). nonnull is only sound once the field holds a
+    // constructed, non-null pointer.
+    auto* storage = builder.CreateAlloca(i32Ty, nullptr, "storage");
+    auto* beginGep = builder.CreateStructGEP(vecTy, alloca, 0, "vec.begin.init");
+    builder.CreateStore(storage, beginGep);
+
     auto* gep = builder.CreateStructGEP(vecTy, alloca, 0);
     auto* load = builder.CreateLoad(ptrTy, gep);
     auto* intVal = builder.CreatePtrToInt(load, i32Ty);
@@ -1201,6 +1219,440 @@ TEST_F(IndirectionPassTest, AutoMode_ForceConfigOverride) {
 
     EXPECT_EQ(autoPromoted, forcePromoted);
     EXPECT_GE(autoPromoted, 1);
+}
+
+// ==================== Devirt safety regression tests ====================
+
+// Regression for the speculative-devirt InvokeInst crash: an indirect virtual
+// call inside an EH scope lowers to an indirect `invoke` (a terminator). The
+// old code collected it as a speculative-devirt candidate and called
+// splitBasicBlock(call->getNextNode()) — but a terminator has no next node, so
+// getNextNode() is null and the split dereferenced it. With multiple derived
+// types declared the call IS a speculative-devirt candidate, so this exercises
+// the exact path. The pass must not crash and must leave valid IR.
+TEST_F(IndirectionPassTest, SpeculativeDevirt_IndirectInvoke_NoCrash) {
+    llvm::LLVMContext ctx;
+    auto module = std::make_unique<llvm::Module>("test_devirt_invoke", ctx);
+    auto* i32Ty = llvm::Type::getInt32Ty(ctx);
+    auto* ptrTy = llvm::PointerType::get(ctx, 0);
+
+    // Personality function (required for invoke + landingpad)
+    auto* personalityTy = llvm::FunctionType::get(i32Ty, true);
+    auto* personality =
+        llvm::Function::Create(personalityTy, llvm::GlobalValue::ExternalLinkage, "__gxx_personality_v0", *module);
+
+    // Stage function: receives object pointer, dispatches via vtable using an
+    // INVOKE (not a call) — i.e. a virtual call in a try block.
+    auto* stageTy = llvm::FunctionType::get(i32Ty, {ptrTy}, false);
+    auto* stageFunc = llvm::Function::Create(stageTy, llvm::GlobalValue::ExternalLinkage, "eh_stage", *module);
+    stageFunc->setPersonalityFn(personality);
+
+    auto* entry = llvm::BasicBlock::Create(ctx, "entry", stageFunc);
+    auto* normalBB = llvm::BasicBlock::Create(ctx, "cont", stageFunc);
+    auto* lpadBB = llvm::BasicBlock::Create(ctx, "lpad", stageFunc);
+    {
+        llvm::IRBuilder<> b(entry);
+        auto* objPtr = stageFunc->getArg(0);
+        // vtable dispatch pattern: load vtable, GEP slot 0, load fptr.
+        auto* vtable = b.CreateLoad(ptrTy, objPtr, "vtable");
+        auto* fptr = b.CreateGEP(ptrTy, vtable, llvm::ConstantInt::get(i32Ty, 0), "fptr");
+        auto* target = b.CreateLoad(ptrTy, fptr, "target");
+        // Indirect INVOKE through the loaded function pointer (terminator).
+        b.CreateInvoke(llvm::FunctionType::get(i32Ty, {ptrTy}, false), target, normalBB, lpadBB, {objPtr});
+    }
+    {
+        llvm::IRBuilder<> b(lpadBB);
+        auto* lp = b.CreateLandingPad(llvm::StructType::get(ptrTy, i32Ty), 0);
+        lp->setCleanup(true);
+        b.CreateRet(llvm::ConstantInt::get(i32Ty, 0));
+    }
+    {
+        llvm::IRBuilder<> b(normalBB);
+        b.CreateRet(llvm::ConstantInt::get(i32Ty, 1));
+    }
+
+    SymbolTable symbols;
+    SymbolMapping mapping;
+    std::vector<VisibilityEntry> entries;
+
+    // Base Shape with two derived types -> multiple-derived => speculative path.
+    ClassSymbol baseCls;
+    baseCls.qualifiedName = "gfx::Shape";
+    baseCls.simpleName = "Shape";
+    baseCls.visibility = Visibility::Public;
+    baseCls.memberFunctions = {"gfx::Shape::area"};
+    symbols.addClassSymbol(baseCls);
+
+    for (const char* d : {"gfx::Rect", "gfx::Circle"}) {
+        ClassSymbol derived;
+        derived.qualifiedName = d;
+        derived.simpleName = d;
+        derived.visibility = Visibility::Public;
+        TypeNode baseType;
+        baseType.nameParts = {"gfx", "Shape"};
+        derived.baseClass = baseType;
+        derived.memberFunctions = {std::string(d) + "::area"};
+        symbols.addClassSymbol(derived);
+    }
+
+    FunctionSymbol stageSym;
+    stageSym.qualifiedName = "gfx::eh_stage";
+    stageSym.simpleName = "eh_stage";
+    stageSym.visibility = Visibility::Protected;
+    Parameter param;
+    param.name = "shape";
+    param.type.nameParts = {"gfx", "Shape"}; // base type with multiple derived
+    param.type.modifier = TypeNode::Ptr;
+    stageSym.params.push_back(param);
+    symbols.addFunction(stageSym);
+
+    LogicBlockEntry lb;
+    lb.qualifiedName = "gfx::render";
+    lb.simpleName = "render";
+    lb.isPipeline = true;
+    lb.calledFunctions = {"gfx::eh_stage"};
+    PipelineAnalysis analysis;
+    analysis.stages = {{"gfx::eh_stage", 0}};
+    lb.pipelineAnalysis = analysis;
+    symbols.addLogicBlock(lb);
+
+    mapping.matched["gfx::eh_stage"] = stageFunc;
+
+    IndirectionConfig config;
+    config.mode = topo::FeatureMode::Force;
+    config.uniquePtrPromotion = false;
+    config.sharedPtrExclusive = false;
+    config.vectorSpanLowering = false;
+    config.pointerAttrInference = false;
+    config.devirtualize = false; // isolate the 10f speculative path
+    config.vtableOptimize = true;
+
+    // Must not crash on the indirect invoke...
+    IndirectionPass::run(*module, entries, mapping, symbols, config);
+
+    // ...and the invoke must still be intact and the IR valid (declined, not
+    // miscompiled).
+    EXPECT_FALSE(llvm::verifyModule(*module, &llvm::errs())) << "speculative devirt left invalid IR for indirect invoke";
+    bool foundInvoke = false;
+    for (auto& bb : *stageFunc) {
+        for (auto& inst : bb) {
+            if (llvm::isa<llvm::InvokeInst>(&inst)) foundInvoke = true;
+        }
+    }
+    EXPECT_TRUE(foundInvoke) << "indirect invoke should be left untouched (speculative devirt declined)";
+}
+
+// Regression for the inferPointerAttrs out-of-bounds param read: when a stage
+// function `func` is passed as an ARGUMENT to some other call g(func, ...) (so
+// `func` is a user of a CallBase but not its callee), the old loop read
+// call->getArgOperand(i) with func's parameter index against g's arg list —
+// past the args when i >= g->arg_size(). The fix skips users where func is not
+// the callee. Here func has a pointer param at index 1, but the only "call"
+// using func passes it as g's single (index-0) argument; reading index 1 would
+// be OOB. The pass must not crash and must not wrongly mark the param nonnull.
+TEST_F(IndirectionPassTest, InferPointerAttrs_FuncAsArgument_NoOOB) {
+    llvm::LLVMContext ctx;
+    auto module = std::make_unique<llvm::Module>("test_infer_oob", ctx);
+    auto* i32Ty = llvm::Type::getInt32Ty(ctx);
+    auto* ptrTy = llvm::PointerType::get(ctx, 0);
+
+    // A vector type so a span-lowering fires — inferPointerAttrs is gated on at
+    // least one other transform having fired (see IndirectionPass::run), so we
+    // need a lowered vector to open that gate and reach the inference loop.
+    auto* vecTy = llvm::StructType::create(ctx, {ptrTy, ptrTy, ptrTy}, "class.std::vector.oob");
+
+    // Stage function: (i32, ptr) -> i32. Pointer param is at index 1.
+    auto* stageTy = llvm::FunctionType::get(i32Ty, {i32Ty, ptrTy}, false);
+    auto* stageFunc = llvm::Function::Create(stageTy, llvm::GlobalValue::ExternalLinkage, "stage_fn", *module);
+    {
+        auto* bb = llvm::BasicBlock::Create(ctx, "entry", stageFunc);
+        llvm::IRBuilder<> b(bb);
+        // Vector with an initialized begin pointer -> span lowering will fire.
+        auto* vec = b.CreateAlloca(vecTy, nullptr, "vec");
+        auto* storage = b.CreateAlloca(i32Ty, nullptr, "storage");
+        auto* beginGep = b.CreateStructGEP(vecTy, vec, 0, "vec.begin.init");
+        b.CreateStore(storage, beginGep);
+        b.CreateRet(llvm::ConstantInt::get(i32Ty, 0));
+    }
+
+    // Another function g(ptr) -> void; its body calls g passing stageFunc as the
+    // (single, index-0) pointer argument. So stageFunc is a user of a CallBase
+    // where it is the ARGUMENT, not the callee. Index 1 against g's 1-arg list
+    // is out of bounds.
+    auto* gTy = llvm::FunctionType::get(llvm::Type::getVoidTy(ctx), {ptrTy}, false);
+    auto* gFunc = llvm::Function::Create(gTy, llvm::GlobalValue::ExternalLinkage, "g_consumer", *module);
+    {
+        auto* bb = llvm::BasicBlock::Create(ctx, "entry", gFunc);
+        llvm::IRBuilder<> b(bb);
+        b.CreateCall(gFunc, {stageFunc}); // passes stageFunc as an argument
+        b.CreateRetVoid();
+    }
+
+    SymbolTable symbols;
+    SymbolMapping mapping;
+    std::vector<VisibilityEntry> entries;
+
+    FunctionSymbol stageSym;
+    stageSym.qualifiedName = "ns::stage_fn";
+    stageSym.simpleName = "stage_fn";
+    stageSym.visibility = Visibility::Protected;
+    symbols.addFunction(stageSym);
+
+    LogicBlockEntry lb;
+    lb.qualifiedName = "ns::pipe";
+    lb.simpleName = "pipe";
+    lb.isPipeline = true;
+    lb.calledFunctions = {"ns::stage_fn"};
+    PipelineAnalysis analysis;
+    analysis.stages = {{"ns::stage_fn", 0}};
+    lb.pipelineAnalysis = analysis;
+    symbols.addLogicBlock(lb);
+
+    mapping.matched["ns::stage_fn"] = stageFunc;
+
+    IndirectionConfig config;
+    config.mode = topo::FeatureMode::Force;
+    config.uniquePtrPromotion = false;
+    config.sharedPtrExclusive = false;
+    config.vectorSpanLowering = true;   // fires -> opens the inference gate
+    config.pointerAttrInference = true; // exercise inferPointerAttrs
+    config.devirtualize = false;
+    config.vtableOptimize = false;
+
+    // Must not crash / read OOB.
+    auto stats = IndirectionPass::run(*module, entries, mapping, symbols, config);
+    ASSERT_GE(stats.vectorLowered, 1) << "vector lowering must fire to reach inferPointerAttrs";
+
+    // The only call using stageFunc passes it as an argument, never as the
+    // callee, so there is no proven-non-null call site for param 1 — it must
+    // NOT be marked nonnull.
+    EXPECT_FALSE(stageFunc->getArg(1)->hasNonNullAttr())
+        << "param wrongly marked nonnull from a call where func is an argument, not the callee";
+    EXPECT_FALSE(llvm::verifyModule(*module, &llvm::errs()));
+}
+
+// Regression for the vtable-slot ordering defect: ClassSymbol::memberFunctions
+// is declaration-ordered and includes static methods, but a vtable slot only
+// counts instance methods. With a leading STATIC method, slot 0 must resolve to
+// the first INSTANCE method, not the static one. The fix filters static methods
+// out of the vtable view before indexing.
+TEST_F(IndirectionPassTest, Devirt_StaticMethodSkippedInVtableOrder) {
+    llvm::LLVMContext ctx;
+    auto module = std::make_unique<llvm::Module>("test_devirt_static", ctx);
+    auto* i32Ty = llvm::Type::getInt32Ty(ctx);
+    auto* ptrTy = llvm::PointerType::get(ctx, 0);
+
+    auto* methodTy = llvm::FunctionType::get(i32Ty, {ptrTy}, false);
+    // The instance method that occupies vtable slot 0 (the intended target).
+    auto* areaFn = llvm::Function::Create(methodTy, llvm::GlobalValue::ExternalLinkage, "Widget_area", *module);
+    {
+        auto* bb = llvm::BasicBlock::Create(ctx, "entry", areaFn);
+        llvm::IRBuilder<> b(bb);
+        b.CreateRet(llvm::ConstantInt::get(i32Ty, 7));
+    }
+    // The static method that precedes it in declaration order (NOT in vtable).
+    auto* makeFn = llvm::Function::Create(methodTy, llvm::GlobalValue::ExternalLinkage, "Widget_make", *module);
+    {
+        auto* bb = llvm::BasicBlock::Create(ctx, "entry", makeFn);
+        llvm::IRBuilder<> b(bb);
+        b.CreateRet(llvm::ConstantInt::get(i32Ty, 0));
+    }
+
+    auto* stageTy = llvm::FunctionType::get(i32Ty, {ptrTy}, false);
+    auto* stageFunc = llvm::Function::Create(stageTy, llvm::GlobalValue::ExternalLinkage, "use_widget", *module);
+    {
+        auto* bb = llvm::BasicBlock::Create(ctx, "entry", stageFunc);
+        llvm::IRBuilder<> b(bb);
+        auto* objPtr = stageFunc->getArg(0);
+        auto* vtable = b.CreateLoad(ptrTy, objPtr, "vtable");
+        auto* fptr = b.CreateGEP(ptrTy, vtable, llvm::ConstantInt::get(i32Ty, 0), "fptr"); // slot 0
+        auto* target = b.CreateLoad(ptrTy, fptr, "target");
+        auto* res = b.CreateCall(llvm::FunctionType::get(i32Ty, {ptrTy}, false), target, {objPtr});
+        b.CreateRet(res);
+    }
+
+    SymbolTable symbols;
+    SymbolMapping mapping;
+    std::vector<VisibilityEntry> entries;
+
+    // Concrete leaf class Widget; declaration order is [make (static), area].
+    ClassSymbol widgetCls;
+    widgetCls.qualifiedName = "ui::Widget";
+    widgetCls.simpleName = "Widget";
+    widgetCls.visibility = Visibility::Public;
+    widgetCls.memberFunctions = {"ui::Widget::make", "ui::Widget::area"};
+    symbols.addClassSymbol(widgetCls);
+
+    FunctionSymbol makeSym;
+    makeSym.qualifiedName = "ui::Widget::make";
+    makeSym.simpleName = "make";
+    makeSym.visibility = Visibility::Public;
+    makeSym.isStatic = true; // static -> no vtable slot
+    symbols.addFunction(makeSym);
+
+    FunctionSymbol areaSym;
+    areaSym.qualifiedName = "ui::Widget::area";
+    areaSym.simpleName = "area";
+    areaSym.visibility = Visibility::Public;
+    symbols.addFunction(areaSym);
+
+    FunctionSymbol stageSym;
+    stageSym.qualifiedName = "ui::use_widget";
+    stageSym.simpleName = "use_widget";
+    stageSym.visibility = Visibility::Protected;
+    Parameter param;
+    param.name = "w";
+    param.type.nameParts = {"ui", "Widget"}; // concrete leaf
+    param.type.modifier = TypeNode::Ptr;
+    stageSym.params.push_back(param);
+    symbols.addFunction(stageSym);
+
+    LogicBlockEntry lb;
+    lb.qualifiedName = "ui::render";
+    lb.simpleName = "render";
+    lb.isPipeline = true;
+    lb.calledFunctions = {"ui::use_widget"};
+    PipelineAnalysis analysis;
+    analysis.stages = {{"ui::use_widget", 0}};
+    lb.pipelineAnalysis = analysis;
+    symbols.addLogicBlock(lb);
+
+    mapping.matched["ui::use_widget"] = stageFunc;
+    mapping.matched["ui::Widget::make"] = makeFn;
+    mapping.matched["ui::Widget::area"] = areaFn;
+
+    IndirectionConfig config;
+    config.mode = topo::FeatureMode::Force;
+    config.uniquePtrPromotion = false;
+    config.sharedPtrExclusive = false;
+    config.vectorSpanLowering = false;
+    config.pointerAttrInference = false;
+    config.devirtualize = true;
+    config.vtableOptimize = false;
+
+    IndirectionPass::run(*module, entries, mapping, symbols, config);
+
+    // Slot 0 must resolve to the instance method area(), never the static make().
+    bool calledArea = false;
+    bool calledMake = false;
+    for (auto& bb : *stageFunc) {
+        for (auto& inst : bb) {
+            if (auto* call = llvm::dyn_cast<llvm::CallInst>(&inst)) {
+                if (call->getCalledFunction() == areaFn) calledArea = true;
+                if (call->getCalledFunction() == makeFn) calledMake = true;
+            }
+        }
+    }
+    EXPECT_TRUE(calledArea) << "vtable slot 0 should resolve to first instance method (area)";
+    EXPECT_FALSE(calledMake) << "vtable slot 0 must not resolve to the leading static method (make)";
+    EXPECT_FALSE(llvm::verifyModule(*module, &llvm::errs()));
+}
+
+// Regression for the non-constant GEP index: a vtable GEP with a runtime
+// (non-constant) index is not a recognizable slot, so isVtableCall must report
+// no match rather than treating it as slot 0 (which would devirtualize to
+// method[0]). With a runtime index the call must be left indirect.
+TEST_F(IndirectionPassTest, Devirt_NonConstantSlot_NotResolved) {
+    llvm::LLVMContext ctx;
+    auto module = std::make_unique<llvm::Module>("test_devirt_runtime_idx", ctx);
+    auto* i32Ty = llvm::Type::getInt32Ty(ctx);
+    auto* ptrTy = llvm::PointerType::get(ctx, 0);
+
+    auto* methodTy = llvm::FunctionType::get(i32Ty, {ptrTy}, false);
+    auto* areaFn = llvm::Function::Create(methodTy, llvm::GlobalValue::ExternalLinkage, "D_area", *module);
+    {
+        auto* bb = llvm::BasicBlock::Create(ctx, "entry", areaFn);
+        llvm::IRBuilder<> b(bb);
+        b.CreateRet(llvm::ConstantInt::get(i32Ty, 1));
+    }
+
+    // Stage takes (ptr obj, i32 slot) and indexes the vtable by the RUNTIME slot.
+    auto* stageTy = llvm::FunctionType::get(i32Ty, {ptrTy, i32Ty}, false);
+    auto* stageFunc = llvm::Function::Create(stageTy, llvm::GlobalValue::ExternalLinkage, "dyn_dispatch", *module);
+    {
+        auto* bb = llvm::BasicBlock::Create(ctx, "entry", stageFunc);
+        llvm::IRBuilder<> b(bb);
+        auto* objPtr = stageFunc->getArg(0);
+        auto* slot = stageFunc->getArg(1); // non-constant index
+        auto* vtable = b.CreateLoad(ptrTy, objPtr, "vtable");
+        auto* fptr = b.CreateGEP(ptrTy, vtable, slot, "fptr");
+        auto* target = b.CreateLoad(ptrTy, fptr, "target");
+        auto* res = b.CreateCall(llvm::FunctionType::get(i32Ty, {ptrTy}, false), target, {objPtr});
+        b.CreateRet(res);
+    }
+
+    SymbolTable symbols;
+    SymbolMapping mapping;
+    std::vector<VisibilityEntry> entries;
+
+    ClassSymbol baseCls;
+    baseCls.qualifiedName = "g::Base";
+    baseCls.simpleName = "Base";
+    baseCls.visibility = Visibility::Public;
+    baseCls.memberFunctions = {"g::Base::area"};
+    symbols.addClassSymbol(baseCls);
+
+    ClassSymbol derivedCls;
+    derivedCls.qualifiedName = "g::D";
+    derivedCls.simpleName = "D";
+    derivedCls.visibility = Visibility::Public;
+    TypeNode baseType;
+    baseType.nameParts = {"g", "Base"};
+    derivedCls.baseClass = baseType;
+    derivedCls.memberFunctions = {"g::D::area"};
+    symbols.addClassSymbol(derivedCls);
+
+    FunctionSymbol areaSym;
+    areaSym.qualifiedName = "g::D::area";
+    areaSym.simpleName = "area";
+    areaSym.visibility = Visibility::Public;
+    symbols.addFunction(areaSym);
+
+    FunctionSymbol stageSym;
+    stageSym.qualifiedName = "g::dyn_dispatch";
+    stageSym.simpleName = "dyn_dispatch";
+    stageSym.visibility = Visibility::Protected;
+    Parameter param;
+    param.name = "obj";
+    param.type.nameParts = {"g", "D"}; // concrete
+    param.type.modifier = TypeNode::Ptr;
+    stageSym.params.push_back(param);
+    symbols.addFunction(stageSym);
+
+    LogicBlockEntry lb;
+    lb.qualifiedName = "g::render";
+    lb.simpleName = "render";
+    lb.isPipeline = true;
+    lb.calledFunctions = {"g::dyn_dispatch"};
+    PipelineAnalysis analysis;
+    analysis.stages = {{"g::dyn_dispatch", 0}};
+    lb.pipelineAnalysis = analysis;
+    symbols.addLogicBlock(lb);
+
+    mapping.matched["g::dyn_dispatch"] = stageFunc;
+    mapping.matched["g::D::area"] = areaFn;
+
+    IndirectionConfig config;
+    config.mode = topo::FeatureMode::Force;
+    config.uniquePtrPromotion = false;
+    config.sharedPtrExclusive = false;
+    config.vectorSpanLowering = false;
+    config.pointerAttrInference = false;
+    config.devirtualize = true;
+    config.vtableOptimize = false;
+
+    auto stats = IndirectionPass::run(*module, entries, mapping, symbols, config);
+
+    EXPECT_EQ(stats.callsDevirtualized, 0) << "runtime-indexed vtable slot must not be devirtualized to method[0]";
+    bool stillIndirect = false;
+    for (auto& bb : *stageFunc) {
+        for (auto& inst : bb) {
+            if (auto* call = llvm::dyn_cast<llvm::CallInst>(&inst)) {
+                if (!call->getCalledFunction()) stillIndirect = true;
+            }
+        }
+    }
+    EXPECT_TRUE(stillIndirect) << "call with a non-constant vtable index should remain indirect";
 }
 
 } // namespace

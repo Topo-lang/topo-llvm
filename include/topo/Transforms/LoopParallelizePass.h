@@ -39,14 +39,19 @@ public:
     /// Step C (when config.reductionEnabled): Reduction loops — loops
     /// with associative accumulations (add, mul, and, or, xor, fadd,
     /// fmul) that would otherwise be rejected for cross-iteration
-    /// dependencies — are DETECTED only. `detectReduction()` and
-    /// `ReductionInfo::getIdentity()` (identity-element computation) are
-    /// implemented, but the partial-accumulator combine is NOT YET
-    /// IMPLEMENTED: no per-partition partial-accumulator PHI and no
-    /// post-await serial combine loop are materialized. Eligible
-    /// reduction loops are diagnosed via a remark and are NOT
-    /// partitioned — the Step B eligibility gate skips them (Step A
-    /// metadata only) pending the combine step.
+    /// dependencies — ARE partitioned. `detectReduction()` accepts a
+    /// loop-carried accumulator only when its single in-loop use is the
+    /// recurrence binop (the use-restriction guard), and
+    /// `ReductionInfo::getIdentity()` supplies the operator identity.
+    /// Each spawned partition runs with a partial-accumulator seeded to
+    /// that identity; after `topo_task_await_all`, a serial combine loop
+    /// folds every partition's partial into one value, then applies the
+    /// original loop init exactly once and routes the combined result to
+    /// the loop's exit (LCSSA) uses. FP reductions preserve the original
+    /// binop's fast-math flags (reassociation is licensed by the
+    /// parallel-stage declaration). When config.reductionEnabled is off,
+    /// reduction loops are rejected by the cross-iteration gate (Step A
+    /// metadata only).
     ///
     /// Safety: loops with cross-iteration data deps, calls to
     /// synchronization primitives, or non-computable trip counts

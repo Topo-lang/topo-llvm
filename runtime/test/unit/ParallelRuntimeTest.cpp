@@ -123,6 +123,56 @@ TEST(ParallelRuntimeLazyInit, EnsureInitDoesNotCrash) {
     EXPECT_EQ(val, 42);
 }
 
+// Regression for the lazy-init publication race (intermittent 0.00s SIGABRT on
+// macOS). do_init() previously published g_pool (g_pool = new ThreadPool())
+// BEFORE g_pool->start(n) completed, so a racing ensure_init reader could
+// observe a non-null pointer to an unstarted pool (num_workers == 0, empty
+// queues) and submit()/steal against it — undefined behavior. With g_pool an
+// atomic published via a release store only after start() finishes, every
+// thread that observes a non-null pool sees a fully-started one.
+//
+// Drive the race directly: tear the pool down, then have many threads
+// simultaneously hit the lazy-init fast path + spawn + await. Repeat so the
+// init window is hit from a cold state each iteration.
+TEST(ParallelRuntimeLazyInit, ConcurrentEnsureInitFromColdStateNoCrash) {
+    constexpr int kRounds = 16;
+    constexpr int kThreads = 8;
+
+    for (int round = 0; round < kRounds; ++round) {
+        // Reset to a cold (uninitialized) state so each round races do_init().
+        topo::parallel::shutdown();
+
+        std::atomic<bool> go{false};
+        std::atomic<int> completed{0};
+        std::vector<std::thread> racers;
+        racers.reserve(kThreads);
+
+        for (int t = 0; t < kThreads; ++t) {
+            racers.emplace_back([&go, &completed]() {
+                // Spin until released so all threads collide on the lazy-init
+                // window at once.
+                while (!go.load(std::memory_order_acquire)) {
+                    std::this_thread::yield();
+                }
+                topo_parallel_ensure_init();
+                int v = 0;
+                auto* task = topo_task_spawn(set_value, &v);
+                topo_task_await(task);
+                if (v == 42) completed.fetch_add(1, std::memory_order_relaxed);
+            });
+        }
+
+        go.store(true, std::memory_order_release);
+        for (auto& th : racers) th.join();
+
+        EXPECT_EQ(completed.load(std::memory_order_relaxed), kThreads)
+            << "round " << round;
+    }
+
+    // Leave the pool in a sane state for any test that follows.
+    topo::parallel::shutdown();
+}
+
 // ---- Cost sampling ----
 
 static void heavy_with_cost(void* arg) {

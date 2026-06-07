@@ -40,6 +40,7 @@ add_executable(topo-llvm-unit-tests
     unit/SymbolObfuscatorTest.cpp
     unit/PassReportsSidecarSchemaTest.cpp
     unit/RuntimeAbiCheckInjectionTest.cpp
+    unit/LifetimeArenaPassTest.cpp
 )
 # TopoTransforms ↔ TopoBackend form a static-archive cycle (TopoTransforms
 # uses TopoBackend's CodegenContext; TopoBackend's PassPipeline.cpp

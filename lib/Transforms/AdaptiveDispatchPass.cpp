@@ -182,6 +182,15 @@ int AdaptiveDispatchPass::run(llvm::Module& module,
         // 4. Create jit_path block
         auto* jitBlock = llvm::BasicBlock::Create(ctx, "jit_path", pipelineFunc, &origEntry);
 
+        // The JIT path's actual `ret` does NOT live in jit_path: after the
+        // one-shot pass-event split, jit_path ends with a conditional branch
+        // and the tail call + return land in the pe_done (alreadyBB) block
+        // created below. The cost_end loop in step 6 must skip that block
+        // too — cost_begin is only emitted in aot_entry, so any cost_end on
+        // the JIT path would be unbalanced. Captured here so it is in scope
+        // for the loop.
+        llvm::BasicBlock* jitRetBlock = nullptr;
+
         // 5. Build the dispatch in the new entry block
         {
             llvm::IRBuilder<> builder(newEntry);
@@ -224,6 +233,12 @@ int AdaptiveDispatchPass::run(llvm::Module& module,
                     llvm::BasicBlock::Create(ctx, "pe_done", pipelineFunc);
                 auto* emitBB =
                     llvm::BasicBlock::Create(ctx, "pe_emit", pipelineFunc);
+
+                // pe_done holds the JIT path's tail call + ret. Record it so
+                // the cost_end loop skips it (see step 6) — keeping the tail
+                // call immediately followed by its ret (TCO) and avoiding an
+                // unbalanced cost_end on the JIT path.
+                jitRetBlock = alreadyBB;
 
                 auto* flag = jitBuilder.CreateLoad(
                     llvm::Type::getInt8Ty(ctx), emittedGV);
@@ -269,10 +284,18 @@ int AdaptiveDispatchPass::run(llvm::Module& module,
             aotBuilder.CreateCall(costBeginCallee, {pipelineNameStr});
         }
 
-        // Insert cost_end before every return instruction in the function
-        // (except in jit_path, which has its own return)
+        // Insert cost_end before every return instruction on the AOT path.
+        // Skip the whole JIT dispatch path: jit_path itself has no return,
+        // and the JIT path's actual return lives in pe_done (jitRetBlock).
+        // cost_begin is only emitted at the top of aot_entry, so injecting
+        // cost_end on the JIT path would be unbalanced (corrupts adaptive
+        // cost accounting — the runtime can consume an outer AOT begin on a
+        // re-entrant same-name pipeline) and would also break the tail call
+        // by interposing a call between it and its ret. pe_emit ends in an
+        // unconditional branch (no return), so it needs no special-casing.
         for (auto& BB : *pipelineFunc) {
-            if (&BB == jitBlock) continue; // skip jit_path
+            if (&BB == jitBlock) continue;     // skip jit_path (no return)
+            if (&BB == jitRetBlock) continue;  // skip pe_done (JIT-path ret)
 
             auto* terminator = BB.getTerminator();
             if (auto* ret = llvm::dyn_cast<llvm::ReturnInst>(terminator)) {

@@ -2,6 +2,8 @@
 #include "topo/Backend/SymbolMapper.h"
 #include "topo/Sema/SymbolTable.h"
 
+#include <llvm/ADT/SmallPtrSet.h>
+#include <llvm/ADT/SmallVector.h>
 #include <llvm/IR/Function.h>
 #include <llvm/IR/IRBuilder.h>
 #include <llvm/IR/Instructions.h>
@@ -252,6 +254,87 @@ TEST_F(AdaptiveDispatchPassTest, PassEventEmitInjectedAtDispatch) {
         if (GV.getName().contains(".__pe_emitted")) foundFlag = true;
     }
     EXPECT_TRUE(foundFlag);
+}
+
+// Regression: cost_end must NOT leak onto the JIT dispatch path.
+// cost_begin is only emitted at the top of aot_entry, so any cost_end on
+// the entry -> jit_path -> pe_done -> ret path would be unbalanced (corrupts
+// adaptive cost accounting) and would break the tail call by interposing a
+// call between it and its ret. The cost_end loop must skip both jit_path and
+// pe_done (the JIT-path return block).
+TEST_F(AdaptiveDispatchPassTest, CostEndNotOnJitPath) {
+    llvm::LLVMContext ctx;
+    DispatchTestPipeline tp;
+    tp.build(ctx);
+
+    AdaptiveConfig config;
+    config.mode = topo::FeatureMode::Auto;
+
+    AdaptiveDispatchPass::run(*tp.module, tp.symbols, tp.mapping, config);
+
+    // Walk every block reachable from `entry` WITHOUT entering aot_entry
+    // (i.e. the JIT dispatch path: entry -> jit_path -> pe_emit/pe_done).
+    // Assert none of them contains a topo_cost_end call.
+    auto* entryBB = &tp.pipelineFunc->getEntryBlock();
+    ASSERT_EQ(entryBB->getName(), "entry");
+
+    llvm::SmallPtrSet<llvm::BasicBlock*, 8> visited;
+    llvm::SmallVector<llvm::BasicBlock*, 8> worklist{entryBB};
+    bool sawCostEndOnJitPath = false;
+    while (!worklist.empty()) {
+        auto* BB = worklist.pop_back_val();
+        if (!visited.insert(BB).second) continue;
+        // Do not cross into the AOT body — aot_entry legitimately holds
+        // cost_begin/cost_end; we only care about the JIT path.
+        if (BB->getName() == "aot_entry") continue;
+
+        for (auto& I : *BB) {
+            if (auto* call = llvm::dyn_cast<llvm::CallInst>(&I)) {
+                auto* callee = call->getCalledFunction();
+                if (callee && callee->getName() == "topo_cost_end")
+                    sawCostEndOnJitPath = true;
+            }
+        }
+        auto* term = BB->getTerminator();
+        for (unsigned i = 0, n = term->getNumSuccessors(); i < n; ++i)
+            worklist.push_back(term->getSuccessor(i));
+    }
+    EXPECT_FALSE(sawCostEndOnJitPath);
+
+    // The JIT-path return block (pe_done) must have its tail call
+    // immediately followed by the ret — nothing interposed (preserves TCO).
+    llvm::BasicBlock* peDone = nullptr;
+    for (auto& BB : *tp.pipelineFunc) {
+        if (BB.getName() == "pe_done") peDone = &BB;
+    }
+    ASSERT_NE(peDone, nullptr);
+
+    auto* ret = llvm::dyn_cast<llvm::ReturnInst>(peDone->getTerminator());
+    ASSERT_NE(ret, nullptr);
+    // The instruction right before the ret must be the tail call (for a
+    // non-void pipeline it is also the returned value).
+    ASSERT_NE(ret->getPrevNode(), nullptr);
+    auto* tailCall = llvm::dyn_cast<llvm::CallInst>(ret->getPrevNode());
+    ASSERT_NE(tailCall, nullptr);
+    EXPECT_TRUE(tailCall->isTailCall());
+    // It is the JIT pointer call, never topo_cost_end.
+    auto* tailCallee = tailCall->getCalledFunction();
+    EXPECT_TRUE(tailCallee == nullptr ||
+                tailCallee->getName() != "topo_cost_end");
+
+    // Sanity: cost_end still exists on the AOT path (aot_entry's return).
+    bool costEndOnAot = false;
+    for (auto& BB : *tp.pipelineFunc) {
+        if (BB.getName() != "aot_entry") continue;
+        for (auto& I : BB) {
+            if (auto* call = llvm::dyn_cast<llvm::CallInst>(&I)) {
+                auto* callee = call->getCalledFunction();
+                if (callee && callee->getName() == "topo_cost_end")
+                    costEndOnAot = true;
+            }
+        }
+    }
+    EXPECT_TRUE(costEndOnAot);
 }
 
 // Disabled config must not introduce the pass-event symbol at all

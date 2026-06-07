@@ -60,7 +60,12 @@ static thread_local std::unordered_map<std::string, CostSample> tls_samples;
 
 static std::mutex g_samples_mutex;
 static std::vector<std::unordered_map<std::string, CostSample>*> g_tls_registrations;
-static bool g_instrument = true;
+// g_instrument is written under g_lifecycle_mutex in do_init() but read
+// lock-free on every worker thread in topo_parallel_cost_{begin,end}_impl.
+// A plain bool read concurrently with the write is a data race (UB); make it
+// atomic. Release on the writer / acquire on the readers so a worker that sees
+// the new value also sees the matching g_config publication.
+static std::atomic<bool> g_instrument{true};
 
 // Thread-local registration guard. Adds &tls_samples to g_tls_registrations
 // on first use; removes it on thread exit via its destructor so get_cost_samples()
@@ -269,7 +274,17 @@ struct ThreadPool {
     }
 };
 
-static ThreadPool* g_pool = nullptr;
+// g_pool is read lock-free (acquire) by topo_parallel_ensure_init's
+// double-checked fast path, topo_task_spawn*, and topo_task_await; it is
+// written only under g_lifecycle_mutex. Making it atomic with
+// acquire/release is required for two reasons:
+//   1. Double-checked locking on a plain pointer is a data race (UB).
+//   2. Publication ordering — see do_init() below: the pool must be fully
+//      started before any reader observes a non-null pointer, otherwise a
+//      racing ensure_init reader sees non-null but calls submit() on an
+//      unstarted pool (num_workers==0, empty queues), which is the 0.00s
+//      SIGABRT seen intermittently on macOS (ParallelRuntimeLazyInit).
+static std::atomic<ThreadPool*> g_pool{nullptr};
 static std::mutex g_lifecycle_mutex;
 static topo::parallel::Config g_config;
 
@@ -278,9 +293,15 @@ void do_init() {
     if (n <= 0) n = static_cast<int>(std::thread::hardware_concurrency());
     if (n <= 0) n = 2;
 
-    g_instrument = g_config.instrument;
-    g_pool = new ThreadPool();
-    g_pool->start(n);
+    g_instrument.store(g_config.instrument, std::memory_order_relaxed);
+    // Build and FULLY START the pool in a local before publishing it. The
+    // release store is the last step, so any thread that acquire-loads a
+    // non-null g_pool is guaranteed to see a started pool (start() happens-
+    // before the publication). Publishing before start() completes would let
+    // a racing reader submit to an unstarted pool — use-before-init crash.
+    ThreadPool* p = new ThreadPool();
+    p->start(n);
+    g_pool.store(p, std::memory_order_release);
 }
 
 } // anonymous namespace
@@ -293,10 +314,14 @@ namespace topo::parallel {
 
 void init(const Config& cfg) {
     std::lock_guard<std::mutex> lock(g_lifecycle_mutex);
-    if (g_pool) {
-        g_pool->stop();
-        delete g_pool;
-        g_pool = nullptr;
+    // Null the pointer out (release) BEFORE tearing the pool down so no
+    // lock-free reader can observe a non-null pointer to a pool that is being
+    // stopped/deleted. The store and the teardown both happen under the
+    // lifecycle lock; readers only ever acquire-load.
+    if (ThreadPool* old = g_pool.load(std::memory_order_acquire)) {
+        g_pool.store(nullptr, std::memory_order_release);
+        old->stop();
+        delete old;
     }
     g_config = cfg;
     do_init();
@@ -304,10 +329,10 @@ void init(const Config& cfg) {
 
 void shutdown() {
     std::lock_guard<std::mutex> lock(g_lifecycle_mutex);
-    if (g_pool) {
-        g_pool->stop();
-        delete g_pool;
-        g_pool = nullptr;
+    if (ThreadPool* old = g_pool.load(std::memory_order_acquire)) {
+        g_pool.store(nullptr, std::memory_order_release);
+        old->stop();
+        delete old;
     }
     // Each worker's TLS registration removes itself via the
     // TlsSampleRegistration destructor as the joined thread exits, so there is
@@ -397,41 +422,50 @@ uint32_t topo_parallel_version(void) {
 }
 
 void topo_parallel_ensure_init() {
-    if (g_pool) return;
+    // Double-checked locking: the fast-path read MUST be an acquire-load so it
+    // pairs with do_init()'s release store (a non-null pointer implies a fully
+    // started pool). The recheck under the lock is also an acquire-load.
+    if (g_pool.load(std::memory_order_acquire)) return;
     std::lock_guard<std::mutex> lock(g_lifecycle_mutex);
-    if (g_pool) return;
+    if (g_pool.load(std::memory_order_acquire)) return;
     do_init();
 }
 
 topo_task_t* topo_task_spawn(void (*fn)(void*), void* arg) {
     topo_parallel_ensure_init();
+    // Snapshot g_pool once (acquire) after ensure_init guarantees a started
+    // pool; never dereference the atomic directly. ensure_init just published
+    // it, so it is non-null here.
+    ThreadPool* pool = g_pool.load(std::memory_order_acquire);
     auto* task = new topo_task();
     task->work = [fn, arg]() {
         fn(arg);
     };
-    g_pool->submit(task);
+    pool->submit(task);
     return task;
 }
 
 topo_task_t* topo_task_spawn_ret(void (*fn)(void*, void*), void* arg, void* result_buf, size_t /*result_size*/) {
     topo_parallel_ensure_init();
+    ThreadPool* pool = g_pool.load(std::memory_order_acquire);
     auto* task = new topo_task();
     task->work = [fn, arg, result_buf]() {
         fn(arg, result_buf);
     };
-    g_pool->submit(task);
+    pool->submit(task);
     return task;
 }
 
 topo_task_t* topo_task_spawn_ret_pri(
     void (*fn)(void*, void*), void* arg, void* result_buf, size_t /*result_size*/, int priority) {
     topo_parallel_ensure_init();
+    ThreadPool* pool = g_pool.load(std::memory_order_acquire);
     auto* task = new topo_task();
     task->priority = priority;
     task->work = [fn, arg, result_buf]() {
         fn(arg, result_buf);
     };
-    g_pool->submit(task);
+    pool->submit(task);
     return task;
 }
 
@@ -447,9 +481,16 @@ void topo_task_await(topo_task_t* task) {
     // Non-worker callers (e.g. the main thread) go through the same path —
     // helping drain the pool speeds up the common case at negligible cost.
     while (!task->done.load(std::memory_order_acquire)) {
-        topo_task* helper = g_pool ? g_pool->try_steal_any() : nullptr;
+        // Snapshot g_pool once per iteration (acquire). A concurrent
+        // shutdown() may null it out between our load and use, but the
+        // local copy stays valid: shutdown joins all workers under the
+        // lifecycle lock before delete, and run_stolen runs the task body
+        // on this thread, so a snapshotted-then-deleted pool is the
+        // shutdown-races-await TOCTOU the atomic + snapshot closes.
+        ThreadPool* pool = g_pool.load(std::memory_order_acquire);
+        topo_task* helper = pool ? pool->try_steal_any() : nullptr;
         if (helper) {
-            g_pool->run_stolen(helper);
+            pool->run_stolen(helper);
             continue;
         }
         // No work to help with — park with a short timeout so we re-check
@@ -507,7 +548,7 @@ void topo_task_await_all(topo_task_t** tasks, int count) {
 // zero `topo_cost_*` symbols instead of leaking them via topo-parallel's
 // scheduler colocation.
 extern "C" void topo_parallel_cost_begin_impl(const char* func_name) {
-    if (!g_instrument) return;
+    if (!g_instrument.load(std::memory_order_acquire)) return;
     // Non-worker threads (e.g. main) may execute task bodies via work-helping
     // in topo_task_await. Register their TLS samples lazily on first use so
     // get_cost_samples() sees them.
@@ -516,7 +557,7 @@ extern "C" void topo_parallel_cost_begin_impl(const char* func_name) {
 }
 
 extern "C" void topo_parallel_cost_end_impl(const char* func_name) {
-    if (!g_instrument) return;
+    if (!g_instrument.load(std::memory_order_acquire)) return;
     auto end_tp = std::chrono::steady_clock::now();
     std::string name(func_name);
 

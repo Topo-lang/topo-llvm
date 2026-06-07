@@ -5,12 +5,15 @@
 #include "topo/jit.h"
 #include "topo_adaptive_internal.h"
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
+#include <mutex>
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 namespace topo::parallel {
 // Scoped cost-sample reset, defined in topo_parallel.cpp (linked in
@@ -206,7 +209,14 @@ static void monitorLoop() {
     while (true) {
         {
             std::unique_lock<std::mutex> lock(g_mutex);
-            g_cv.wait_for(lock, std::chrono::milliseconds(g_config.monitor_ms), [] { return g_shutdown; });
+            // Clamp to a >=1ms period. monitor_ms is a user-settable Config
+            // field; a value of 0 turns wait_for into a no-op, making this loop
+            // a 100% CPU busy-spin (it would re-acquire the lock and re-query
+            // cost samples with no delay). Floor it at 1ms here so a zero or
+            // unset config degrades to a sane minimum rather than a hot loop.
+            const auto period = std::chrono::milliseconds(
+                std::max<decltype(g_config.monitor_ms)>(1, g_config.monitor_ms));
+            g_cv.wait_for(lock, period, [] { return g_shutdown; });
 
             if (g_shutdown) return;
         }
@@ -437,51 +447,89 @@ Stats stats() {
 // resolved JIT function pointer.  Mutex is expected to be held by caller.
 static void commitSpecialization(PipelineEntry& entry, void* ptr) {
     if (!ptr) return;
+
+    // g_activeJit counts pipelines whose JIT pointer is currently live. Only a
+    // genuine inactive->active transition adds to that count; force_specialize
+    // on an already-ACTIVE pipeline (re-specialization) installs a new pointer
+    // but does not add a second live pipeline. Incrementing unconditionally
+    // permanently over-counts active_jit, which topo-profile consumes.
+    const bool wasActive = (entry.state == PipelineState::ACTIVE);
+
     std::atomic_store_explicit(
         reinterpret_cast<std::atomic<void*>*>(entry.jitPtr), ptr, std::memory_order_release);
 
     entry.jitVersions++;
     g_specializations.fetch_add(1, std::memory_order_relaxed);
-    g_activeJit.fetch_add(1, std::memory_order_relaxed);
+    if (!wasActive)
+        g_activeJit.fetch_add(1, std::memory_order_relaxed);
     entry.state = PipelineState::ACTIVE;
 
     // Variant switch: AOT path was in effect, JIT pointer now live.
     emitVariantSwitch(entry, "aot", "jit");
 }
 
-void force_specialize(const std::string& name) {
-    std::lock_guard<std::mutex> lock(g_mutex);
-
+// Find a registered pipeline by name. Caller MUST hold g_mutex. Returns
+// nullptr if no such pipeline exists. Note the returned pointer is only valid
+// while the lock is held and g_pipelines is not mutated (register/shutdown can
+// reallocate or clear the vector), so it must be re-resolved after any unlock.
+static PipelineEntry* findPipeline(const std::string& name) {
     for (auto& entry : g_pipelines) {
-        if (entry.pipelineName != name) continue;
-
-        if (entry.jitVersions >= g_config.max_versions) return;
-
-        // Synchronous JIT specialization with cost-derived constraints
-        auto costs = topo::parallel::get_cost_samples();
-        auto ctx = buildConstraintsFromCosts(entry, costs);
-        auto future = topo::jit::specialize(entry.pipelineName, ctx);
-        commitSpecialization(entry, future.get());
-        return;
+        if (entry.pipelineName == name) return &entry;
     }
+    return nullptr;
+}
+
+void force_specialize(const std::string& name) {
+    std::unique_lock<std::mutex> lock(g_mutex);
+
+    PipelineEntry* entry = findPipeline(name);
+    if (!entry) return;
+    if (entry->jitVersions >= g_config.max_versions) return;
+
+    // Build the constraint context under the lock (reads cost samples + the
+    // entry), then kick off the JIT future.
+    auto costs = topo::parallel::get_cost_samples();
+    auto ctx = buildConstraintsFromCosts(*entry, costs);
+    auto future = topo::jit::specialize(entry->pipelineName, ctx);
+
+    // Release the lock across the blocking compile. Holding g_mutex during
+    // future.get() serialized the whole adaptive subsystem (monitor, register,
+    // other force_specialize) behind one synchronous JIT compile. The entry
+    // reference is invalidated by the unlock, so re-resolve it afterwards.
+    lock.unlock();
+    void* ptr = future.get();
+    lock.lock();
+
+    // Re-resolve: the pipeline may have been removed (shutdown) or the vector
+    // reallocated (register) while the lock was dropped. Re-check the budget
+    // too — a concurrent specialization may have consumed it meanwhile.
+    entry = findPipeline(name);
+    if (!entry || entry->jitVersions >= g_config.max_versions) return;
+    commitSpecialization(*entry, ptr);
 }
 
 void force_specialize_bytes(const std::string& name,
                             const void* irBytes, std::size_t irSize,
                             const std::string& metaJson) {
-    std::lock_guard<std::mutex> lock(g_mutex);
+    std::unique_lock<std::mutex> lock(g_mutex);
 
-    for (auto& entry : g_pipelines) {
-        if (entry.pipelineName != name) continue;
+    PipelineEntry* entry = findPipeline(name);
+    if (!entry) return;
+    if (entry->jitVersions >= g_config.max_versions) return;
 
-        if (entry.jitVersions >= g_config.max_versions) return;
+    auto costs = topo::parallel::get_cost_samples();
+    auto ctx = buildConstraintsFromCosts(*entry, costs);
+    auto future = topo::jit::specialize_bytes(entry->pipelineName, irBytes, irSize, metaJson, ctx);
 
-        auto costs = topo::parallel::get_cost_samples();
-        auto ctx = buildConstraintsFromCosts(entry, costs);
-        auto future = topo::jit::specialize_bytes(entry.pipelineName, irBytes, irSize, metaJson, ctx);
-        commitSpecialization(entry, future.get());
-        return;
-    }
+    // Release the monitor lock across the blocking compile (see
+    // force_specialize for the rationale); re-resolve the entry afterwards.
+    lock.unlock();
+    void* ptr = future.get();
+    lock.lock();
+
+    entry = findPipeline(name);
+    if (!entry || entry->jitVersions >= g_config.max_versions) return;
+    commitSpecialization(*entry, ptr);
 }
 
 } // namespace topo::adaptive

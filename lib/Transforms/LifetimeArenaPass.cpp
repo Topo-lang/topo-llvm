@@ -137,8 +137,19 @@ bool escapesScope(llvm::Value* allocResult,
                 // is a local alloca (or GEP into one)
                 auto* dest = store->getPointerOperand()->stripInBoundsOffsets();
                 if (auto* allocaBase = llvm::dyn_cast<llvm::AllocaInst>(dest)) {
-                    // Track loads from this alloca (through any GEP) so we
-                    // can find matching free() calls that reload the pointer.
+                    // The pointer was spilled into a local slot. Track loads
+                    // from this alloca (through any GEP) so we can find
+                    // matching free() calls that reload the pointer.
+                    //
+                    // The slot itself must NOT escape: if the slot's ADDRESS
+                    // leaks (stored elsewhere, passed to a call, returned,
+                    // ptrtoint'd, …) then whoever holds the address can reload
+                    // and outlive the pointer past arena teardown — a dangling
+                    // pointer. So every user of the slot (or a GEP into it)
+                    // other than a load or an address-into-slot store is
+                    // treated as an escape, mirroring the conservative default
+                    // on the main worklist. Bailing out here keeps the site
+                    // un-converted, which is always safe.
                     std::vector<llvm::Value*> allocaWork = {allocaBase};
                     std::unordered_set<llvm::Value*> allocaVisited;
                     while (!allocaWork.empty()) {
@@ -146,10 +157,24 @@ bool escapesScope(llvm::Value* allocResult,
                         allocaWork.pop_back();
                         if (!allocaVisited.insert(av).second) continue;
                         for (auto* au : av->users()) {
-                            if (auto* ld = llvm::dyn_cast<llvm::LoadInst>(au))
+                            if (auto* ld = llvm::dyn_cast<llvm::LoadInst>(au)) {
+                                // Reloading the pointer — continue the escape
+                                // walk from the loaded value.
                                 worklist.push_back(ld);
-                            else if (llvm::isa<llvm::GetElementPtrInst>(au))
+                            } else if (llvm::isa<llvm::GetElementPtrInst>(au)) {
+                                // Address arithmetic within the slot — recurse.
                                 allocaWork.push_back(au);
+                            } else if (auto* st = llvm::dyn_cast<llvm::StoreInst>(au)) {
+                                // Writing INTO the slot (slot is the address)
+                                // is the normal spill; it stays local. But
+                                // storing the slot's ADDRESS as a value
+                                // somewhere leaks it — escape.
+                                if (st->getValueOperand() == av) return true;
+                            } else {
+                                // call(&slot), ret &slot, ptrtoint &slot, or any
+                                // other use of the slot address — escape.
+                                return true;
+                            }
                         }
                     }
                     continue;
@@ -306,6 +331,7 @@ std::optional<ScopeInfo> discoverScope(const std::string& groupName,
 int applyArenaReplacement(llvm::Module& module,
                           llvm::Function* ownerFunc,
                           llvm::CallInst* startCall,
+                          llvm::CallInst* endCall,
                           const std::string& groupName,
                           std::vector<AllocSite>& safeSites,
                           const std::unordered_set<llvm::CallInst*>& escapingFrees,
@@ -411,8 +437,10 @@ int applyArenaReplacement(llvm::Module& module,
         emitArenaEvent(insertPt, peOpenGV, peHeap, peArena, arenaSize);
     }
 
-    // Insert arena_destroy before every ReturnInst in the owner function
-    // and after every LandingPadInst
+    // Insert arena_destroy at the scope's end boundary. When a declared
+    // end-of-lifetime call exists, that is the single teardown point;
+    // otherwise the arena spans the whole owner function and is torn down at
+    // each return / landing-pad exit (see the endCall branch below).
     // Inject arena-close pass-event just before destroy: arena ->
     // freed, size = bytes actually used (queried while still live). The
     // one-shot guard for the close direction makes the record count
@@ -430,17 +458,46 @@ int applyArenaReplacement(llvm::Module& module,
     // Collect insertion points FIRST: injectClose splits blocks (creates
     // new BBs via SplitBlockAndInsertIfThen), so mutating the function
     // while range-iterating its block list would be UB.
+    //
+    // Per-block dedup: a single block can both start with a landing pad and
+    // end with a return (`landingpad; …; ret`). Pushing a close point for
+    // each would inject `topo_arena_destroy(arena)` twice in the same block
+    // — a runtime double-free, since the destroy itself is not one-shot
+    // guarded (only the pass-event emit is). At most one teardown per block.
     std::vector<llvm::Instruction*> closeInsertPts;
-    for (auto& bb : *ownerFunc) {
-        auto* term = bb.getTerminator();
-        if (auto* ret = llvm::dyn_cast<llvm::ReturnInst>(term)) {
-            closeInsertPts.push_back(ret);
-        }
-        // Handle landing pads (exception cleanup)
-        if (auto* lp = llvm::dyn_cast<llvm::LandingPadInst>(&*bb.getFirstNonPHIIt())) {
-            auto insertIt = lp->getIterator();
-            ++insertIt;
-            closeInsertPts.push_back(&*insertIt);
+    std::unordered_set<llvm::BasicBlock*> closedBlocks;
+    auto addClosePt = [&](llvm::Instruction* pt) {
+        if (closedBlocks.insert(pt->getParent()).second) closeInsertPts.push_back(pt);
+    };
+
+    if (endCall) {
+        // A declared end-of-lifetime call was found: the arena's lifetime
+        // ends there, before the owner returns. Tear it down right after the
+        // end call so allocations made after the declared end no longer hit a
+        // live arena (the create..end range semantics). We deliberately do
+        // NOT also inject teardown at returns/landing-pads — that would
+        // destroy the same global arena twice (use-after-free / double-free).
+        auto insertIt = endCall->getIterator();
+        ++insertIt; // place destroy after the end call executes
+        addClosePt(&*insertIt);
+    } else {
+        // No declared end point: the arena spans the whole owner function, so
+        // tear it down on each exit (return) and exceptional cleanup
+        // (landing pad). The return and landing-pad branches are made
+        // mutually exclusive per block by addClosePt's dedup, so a block that
+        // both lands and returns gets exactly one destroy.
+        for (auto& bb : *ownerFunc) {
+            auto* term = bb.getTerminator();
+            if (llvm::isa<llvm::ReturnInst>(term)) {
+                addClosePt(term);
+                continue; // already closed this block — skip landing-pad check
+            }
+            // Handle landing pads (exception cleanup)
+            if (auto* lp = llvm::dyn_cast<llvm::LandingPadInst>(&*bb.getFirstNonPHIIt())) {
+                auto insertIt = lp->getIterator();
+                ++insertIt;
+                addClosePt(&*insertIt);
+            }
         }
     }
     for (auto* pt : closeInsertPts)
@@ -566,8 +623,8 @@ int LifetimeArenaPass::run(llvm::Module& module,
         if (!scopeInfo) continue;
 
         converted += applyArenaReplacement(
-            module, scopeInfo->ownerFunc, scopeInfo->startCall, groupName, scopeInfo->safeSites,
-            scopeInfo->escapingFrees, config);
+            module, scopeInfo->ownerFunc, scopeInfo->startCall, scopeInfo->endCall, groupName,
+            scopeInfo->safeSites, scopeInfo->escapingFrees, config);
     }
 
     if (converted > 0) {

@@ -5,6 +5,7 @@
 #include "topo/Transforms/RuntimeAbiVersions.h"
 
 #include <llvm/IR/Constants.h>
+#include <llvm/IR/Dominators.h>
 #include <llvm/IR/IRBuilder.h>
 #include <llvm/IR/Instructions.h>
 #include <llvm/Transforms/Utils/BasicBlockUtils.h>
@@ -287,6 +288,15 @@ int TopoParallelPass::run(llvm::Module& module,
 
                 if (!irFunc || irFunc->isDeclaration()) continue;
 
+                // Variadic callees are not parallelizable here: the arg-struct
+                // builder below indexes callee->getArg(ai) for every *actual*
+                // call argument (ai < call->arg_size()), but a variadic call
+                // passes more actuals than the callee has declared params, so
+                // getArg() on a varargs-tail index asserts / reads OOB. Decline
+                // such callees as candidates (conservative bail) rather than
+                // emit a crash — matches createTaskWrapper's arg_size() bound.
+                if (irFunc->isVarArg()) continue;
+
                 bool excluded = isExcluded(qualName, config.exclude) || isExcluded(nodeName, config.exclude);
                 if (excluded) continue;
 
@@ -321,8 +331,40 @@ int TopoParallelPass::run(llvm::Module& module,
             if (targetCalls.empty()) continue;
 
             // Transform: replace calls with spawn/await pattern
-            // Insert before the first call
+            // Insert before the first call (block-iteration order; targetCalls
+            // is populated in BB order, so [0] is the earliest call).
             auto* firstCall = targetCalls[0].call;
+
+            // Dominance precondition (correctness): the whole spawn scaffold —
+            // every call's argument-struct stores included — is emitted at
+            // `firstCall`'s position. A task therefore reads its arg struct
+            // from there, so EVERY operand of EVERY parallelized call must be
+            // available (dominate) at `firstCall`. If a later sibling call
+            // consumes a value computed *between* firstCall and itself, that
+            // value does not yet exist at the spawn point: storing it there
+            // would be a use-before-def (invalid IR / miscompile), and the
+            // value genuinely cannot be handed to a task that starts before it
+            // is computed. There is no safe rewrite for that shape under the
+            // spawn-before-firstCall model, so decline to parallelize the whole
+            // stage (conservative bail) rather than emit broken IR. Constants,
+            // Arguments and other non-instruction defs dominate everything per
+            // DominatorTree, so the common shape (all operands are block args
+            // or earlier-dominating defs) is unaffected.
+            llvm::DominatorTree domTree(*pipelineFunc);
+            bool operandsDominateSpawn = true;
+            for (const auto& tc : targetCalls) {
+                auto* call = tc.call;
+                for (unsigned ai = 0; ai < call->arg_size(); ++ai) {
+                    llvm::Value* operand = call->getArgOperand(ai);
+                    if (!domTree.dominates(operand, firstCall)) {
+                        operandsDominateSpawn = false;
+                        break;
+                    }
+                }
+                if (!operandsDominateSpawn) break;
+            }
+            if (!operandsDominateSpawn) continue;
+
             llvm::IRBuilder<> builder(firstCall);
 
             // Ensure runtime is initialized

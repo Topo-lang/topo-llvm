@@ -4,7 +4,6 @@
 #include <llvm/IR/Function.h>
 #include <llvm/IR/Instructions.h>
 #include <llvm/IR/IRBuilder.h>
-#include <llvm/IR/MDBuilder.h>
 #include <llvm/Support/raw_ostream.h>
 
 #include <string>
@@ -295,25 +294,40 @@ int promoteUniquePtr(llvm::Module& module,
 // ============================================================================
 
 /// Check if a stage has exclusive access (no concurrent stages).
-bool isExclusiveStage(const PipelineAnalysis& analysis, const std::string& calledFn, int thisStage) {
+/// `matchedKey` is the actual key under which this function's stage was
+/// found (may be the simple-name fallback rather than `calledFn`). We must
+/// skip BOTH so the function's own stage entry never self-matches and
+/// wrongly reports the stage as non-exclusive — mirrors the noalias guard
+/// in inferPointerAttrs (`otherName == stageIt->first`).
+bool isExclusiveStage(const PipelineAnalysis& analysis, const std::string& calledFn,
+                      const std::string& matchedKey, int thisStage) {
     for (const auto& [otherName, otherStage] : analysis.stages) {
-        if (otherName == calledFn) continue;
+        if (otherName == calledFn || otherName == matchedKey) continue;
         if (otherStage == thisStage) return false;
     }
     return true;
 }
 
 /// Find the stage number for a function in the pipeline analysis.
-/// Returns -1 if not found.
-int findStageNumber(const PipelineAnalysis& analysis, const std::string& calledFn) {
+/// Returns -1 if not found. On success, `matchedKey` is set to the actual
+/// stage-map key that matched (the qualified name or the simple-name
+/// fallback) so the caller can exclude the function's own self-match when
+/// testing stage exclusivity.
+int findStageNumber(const PipelineAnalysis& analysis, const std::string& calledFn, std::string& matchedKey) {
     auto stageIt = analysis.stages.find(calledFn);
-    if (stageIt != analysis.stages.end()) return stageIt->second;
+    if (stageIt != analysis.stages.end()) {
+        matchedKey = stageIt->first;
+        return stageIt->second;
+    }
 
     // Try simple name
     auto lastSep = calledFn.rfind("::");
     std::string simple = (lastSep != std::string::npos) ? calledFn.substr(lastSep + 2) : calledFn;
     stageIt = analysis.stages.find(simple);
-    if (stageIt != analysis.stages.end()) return stageIt->second;
+    if (stageIt != analysis.stages.end()) {
+        matchedKey = stageIt->first;
+        return stageIt->second;
+    }
 
     return -1;
 }
@@ -338,9 +352,14 @@ int eliminateBatchRefcount(llvm::Function& func) {
         for (auto& inst : bb) {
             auto* atomicRMW = llvm::dyn_cast<llvm::AtomicRMWInst>(&inst);
             if (!atomicRMW) {
-                // Intervening call/load/store invalidates pending sub
+                // Any intervening memory op or memory-ordering op invalidates
+                // a pending sub: downgrading a sub/add pair that straddles a
+                // fence (or cmpxchg) would silently drop the ordering edge the
+                // fence/cmpxchg established. Include FenceInst and
+                // AtomicCmpXchgInst alongside call/load/store.
                 if (llvm::isa<llvm::CallBase>(inst) || llvm::isa<llvm::LoadInst>(inst) ||
-                    llvm::isa<llvm::StoreInst>(inst)) {
+                    llvm::isa<llvm::StoreInst>(inst) || llvm::isa<llvm::FenceInst>(inst) ||
+                    llvm::isa<llvm::AtomicCmpXchgInst>(inst)) {
                     pendingSub = nullptr;
                 }
                 continue;
@@ -489,9 +508,10 @@ SharedPtrStats optimizeSharedPtr(llvm::Module& module,
             if (func->isDeclaration()) continue;
             if (allowed && !allowed->count(func)) continue;
 
-            int thisStage = findStageNumber(analysis, calledFn);
+            std::string matchedKey;
+            int thisStage = findStageNumber(analysis, calledFn, matchedKey);
             if (thisStage < 0) continue;
-            if (!isExclusiveStage(analysis, calledFn, thisStage)) continue;
+            if (!isExclusiveStage(analysis, calledFn, matchedKey, thisStage)) continue;
 
             // Step 1: Batch refcount elimination (before ordering downgrade)
             stats.refcountEliminated += eliminateBatchRefcount(*func);
@@ -608,14 +628,34 @@ int lowerVectorToSpan(llvm::Module& module,
             // Verify no-resize: no store to end/capacity fields
             if (hasVectorResize(func, val, sty)) continue;
 
-            // Extract data pointer and size at function entry.
-            // This allows LLVM to treat the access pattern as a simple span,
-            // enabling SIMD vectorization.
-            auto* entryBB = &func.getEntryBlock();
-            llvm::IRBuilder<> builder(entryBB);
+            // Find the store that initializes the vector's begin pointer
+            // (field 0). The begin/end loads must be inserted AFTER this store
+            // — inserting them right after the alloca (as before) reads
+            // uninitialized stack, and tagging that load `nonnull` is unsound.
+            // If no initializing store to field 0 is found in this function, we
+            // cannot prove the data pointer is valid/non-null, so decline the
+            // lowering for this candidate rather than emit an uninitialized
+            // read with a false nonnull claim.
+            llvm::StoreInst* beginInitStore = nullptr;
+            for (auto* user : val->users()) {
+                auto* gep = llvm::dyn_cast<llvm::GetElementPtrInst>(user);
+                if (!gep || gep->getNumIndices() < 2) continue;
+                auto* fieldIdx = llvm::dyn_cast<llvm::ConstantInt>(gep->getOperand(2));
+                if (!fieldIdx || fieldIdx->getZExtValue() != 0) continue;
+                for (auto* gepUser : gep->users()) {
+                    auto* store = llvm::dyn_cast<llvm::StoreInst>(gepUser);
+                    if (store && store->getPointerOperand() == gep) beginInitStore = store;
+                }
+            }
+            if (!beginInitStore) continue;
 
-            if (auto* allocaInst = llvm::dyn_cast<llvm::AllocaInst>(val)) {
-                builder.SetInsertPoint(allocaInst->getNextNode());
+            // Extract data pointer and size right after the begin field is
+            // initialized. This allows LLVM to treat the access pattern as a
+            // simple span, enabling SIMD vectorization, while reading only
+            // already-constructed values.
+            llvm::IRBuilder<> builder(beginInitStore);
+            if (auto* next = beginInitStore->getNextNode()) {
+                builder.SetInsertPoint(next);
             }
 
             auto* ptrTy = llvm::PointerType::get(module.getContext(), 0);
@@ -635,10 +675,19 @@ int lowerVectorToSpan(llvm::Module& module,
             auto* byteSize = builder.CreateSub(endInt, beginInt, "vec.bytesize");
             (void)byteSize; // Size is available for downstream passes
 
-            // Mark data pointer as nonnull (vector always has valid begin())
-            if (!dataPtr->getType()->isVoidTy()) {
-                auto* md = llvm::MDNode::get(module.getContext(), {});
-                if (auto* loadInst = llvm::dyn_cast<llvm::LoadInst>(dataPtr)) loadInst->setMetadata("nonnull", md);
+            // Mark data pointer as nonnull only when the begin field was stored
+            // a provably non-null value (a non-empty vector's begin() is
+            // non-null). For other initializers we leave the load unannotated.
+            if (auto* loadInst = llvm::dyn_cast<llvm::LoadInst>(dataPtr)) {
+                llvm::Value* stored = beginInitStore->getValueOperand();
+                bool storedNonNull = llvm::isa<llvm::AllocaInst>(stored) ||
+                                     llvm::isa<llvm::GlobalVariable>(stored) ||
+                                     (llvm::isa<llvm::Constant>(stored) &&
+                                      !llvm::isa<llvm::ConstantPointerNull>(stored));
+                if (storedNonNull) {
+                    auto* md = llvm::MDNode::get(module.getContext(), {});
+                    loadInst->setMetadata("nonnull", md);
+                }
             }
 
             ++lowered;
@@ -686,6 +735,20 @@ int inferPointerAttrs(llvm::Module& /*module*/,
                 for (auto* user : func->users()) {
                     auto* call = llvm::dyn_cast<llvm::CallBase>(user);
                     if (!call) {
+                        allCallsNonNull = false;
+                        break;
+                    }
+
+                    // `func` may appear in this CallBase as an ARGUMENT (e.g.
+                    // g(func, ...)) rather than as the callee. In that case the
+                    // call's own arg list is unrelated to func's signature, so
+                    // indexing it with func's parameter index `i` is wrong and
+                    // can read past the args (OOB). Only inspect call sites
+                    // where func is actually the callee, and bounds-check i.
+                    if (call->getCalledOperand() != func) continue;
+                    if (i >= call->arg_size()) {
+                        // Arity disagrees with func's signature — cannot prove
+                        // anything about parameter i at this site.
                         allCallsNonNull = false;
                         break;
                     }
@@ -757,8 +820,28 @@ struct TypeHierarchy {
 
     void build(const SymbolTable& symbols) {
         for (const auto& [name, cls] : symbols.classSymbols()) {
-            // Record member functions
-            classMethods[name] = cls.memberFunctions;
+            // Record member functions as a vtable-ordered view.
+            //
+            // ClassSymbol::memberFunctions is filled in source-DECLARATION
+            // order and INCLUDES static methods (SemanticAnalyzer fills the
+            // list and sets isStatic per function). A vtable slot only ever
+            // counts instance (non-static) methods, so indexing the raw list
+            // with a vtable slot mis-resolves whenever a static method
+            // precedes the slot. Filter out static methods here so the slot
+            // index lines up with the instance-method sequence. (Constructors
+            // and the destructor live in separate ClassSymbol fields and are
+            // already absent from this list.)
+            //
+            // Topo has no `virtual` keyword (it is rejected by the lexer), so
+            // there is no finer non-virtual signal to filter on; the
+            // instance-method order is the best available vtable-slot mapping.
+            auto& view = classMethods[name];
+            view.clear();
+            for (const auto& methodQName : cls.memberFunctions) {
+                const auto* fnSym = symbols.findFunction(methodQName);
+                if (fnSym && fnSym->isStatic) continue; // static => no vtable slot
+                view.push_back(methodQName);
+            }
 
             // Record inheritance relationship
             if (cls.baseClass) {
@@ -870,7 +953,10 @@ bool isVtableCall(llvm::CallBase* call, llvm::LoadInst*& vtableLoad, int& vtable
 
     vtableLoad = baseLoad;
 
-    // Extract vtable index from GEP
+    // Extract vtable index from GEP. Only a single CONSTANT index identifies a
+    // recognizable vtable slot. A non-constant (runtime) index — or any other
+    // GEP shape — is NOT a slot we can resolve, so report no match rather than
+    // falsely claiming slot 0 (which would devirtualize to method[0]).
     if (gep->getNumIndices() == 1) {
         if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(gep->getOperand(1))) {
             vtableIdx = static_cast<int>(ci->getZExtValue());
@@ -878,8 +964,7 @@ bool isVtableCall(llvm::CallBase* call, llvm::LoadInst*& vtableLoad, int& vtable
         }
     }
 
-    vtableIdx = 0;
-    return true;
+    return false;
 }
 
 /// Trace the object pointer from a vtable load back to a function argument.
@@ -1007,8 +1092,23 @@ int devirtualizeCalls([[maybe_unused]] llvm::Module& module,
 
                 llvm::Function* targetFunc = targetIt->second;
 
-                // Replace the indirect call with a direct call
-                call->setCalledOperand(targetFunc);
+                // Decline unless the resolved target's signature exactly
+                // matches the indirect call's current FunctionType. Equal types
+                // guarantee arity AND per-argument/return type agreement, so the
+                // rewritten direct call is well-formed; any mismatch would make
+                // setCalledFunction produce IR the verifier rejects (or, with
+                // assertions off, silently mis-type args). Correctness first:
+                // leave the indirect call when the types differ.
+                if (targetFunc->getFunctionType() != call->getFunctionType()) {
+                    continue;
+                }
+
+                // Replace the indirect call with a direct call.
+                // setCalledFunction (not setCalledOperand) also refreshes the
+                // CallBase's cached FunctionType to match the new callee —
+                // setCalledOperand would leave a stale FTy that disagrees with
+                // targetFunc and fails the verifier.
+                call->setCalledFunction(targetFunc);
 
                 // Add inlinehint to the devirtualized target
                 if (!targetFunc->hasFnAttribute(llvm::Attribute::InlineHint)) {
@@ -1107,8 +1207,15 @@ int annotateVtableConstants(llvm::Module& module,
                     // Single concrete type — mark vtable load as constant
                     annotations.push_back({vtableLoad, true});
                 } else if (!derivedTypes.empty()) {
-                    // Multiple types — candidate for speculative devirt
-                    specDevirts.push_back({call, vtableLoad, vtableIdx, derivedTypes[0]});
+                    // Multiple types — candidate for speculative devirt.
+                    // Restrict to plain CallInst: an InvokeInst is a terminator,
+                    // so the merge-split below (splitBasicBlock at the call's
+                    // next node) would dereference a null next-node and corrupt
+                    // the CFG. C++ virtual calls in EH scopes lower to indirect
+                    // invokes, which reach this pass — skip them.
+                    if (llvm::isa<llvm::CallInst>(call)) {
+                        specDevirts.push_back({call, vtableLoad, vtableIdx, derivedTypes[0]});
+                    }
                 }
             }
         }
@@ -1120,74 +1227,38 @@ int annotateVtableConstants(llvm::Module& module,
             ++annotated;
         }
 
-        // Apply speculative devirtualizations (modifies CFG)
-        for (auto& sd : specDevirts) {
-            // Look for the vtable global: _ZTV<len><name>
-            std::string vtableGlobalName = "_ZTV" + std::to_string(sd.hotType.size()) + sd.hotType;
-            auto* vtableGlobal = module.getGlobalVariable(vtableGlobalName);
-            if (!vtableGlobal) {
-                // Try without length prefix
-                vtableGlobalName = "_ZTV" + sd.hotType;
-                vtableGlobal = module.getGlobalVariable(vtableGlobalName);
-            }
-            if (!vtableGlobal) continue;
-
-            // Resolve the hot method
-            auto hotMethodsIt = hierarchy.classMethods.find(sd.hotType);
-            if (hotMethodsIt == hierarchy.classMethods.end()) continue;
-            if (sd.vtableIdx < 0 || static_cast<size_t>(sd.vtableIdx) >= hotMethodsIt->second.size()) continue;
-
-            const std::string& hotMethodName = hotMethodsIt->second[sd.vtableIdx];
-            auto hotFuncIt = mapping.matched.find(hotMethodName);
-            if (hotFuncIt == mapping.matched.end() || !hotFuncIt->second) continue;
-            llvm::Function* hotFunc = hotFuncIt->second;
-
-            // Split the basic block at the call site
-            llvm::BasicBlock* origBB = sd.call->getParent();
-            llvm::BasicBlock* slowBB = origBB->splitBasicBlock(sd.call, "vtable.slow");
-            llvm::BasicBlock* fastBB = llvm::BasicBlock::Create(ctx, "vtable.fast", &func, slowBB);
-            llvm::BasicBlock* mergeBB = slowBB->splitBasicBlock(sd.call->getNextNode(), "vtable.merge");
-
-            // Build the guard in origBB: compare vtable ptr against known vtable
-            origBB->getTerminator()->eraseFromParent();
-            llvm::IRBuilder<> builder(origBB);
-
-            // Compare vtable pointer against known vtable global
-            auto* vtablePtr = sd.vtableLoad;
-            auto* knownVtable = builder.CreateBitCast(vtableGlobal, vtablePtr->getType());
-            auto* isHotType = builder.CreateICmpEQ(vtablePtr, knownVtable, "vtable.guard");
-
-            // Branch with profile weights: 99% fast path
-            auto* brInst = builder.CreateCondBr(isHotType, fastBB, slowBB);
-            llvm::MDBuilder mdBuilder(ctx);
-            brInst->setMetadata(llvm::LLVMContext::MD_prof,
-                mdBuilder.createBranchWeights(99, 1));
-
-            // Fast path: direct call
-            builder.SetInsertPoint(fastBB);
-            std::vector<llvm::Value*> args;
-            for (unsigned i = 0; i < sd.call->arg_size(); ++i) {
-                args.push_back(sd.call->getArgOperand(i));
-            }
-            auto* directCall = builder.CreateCall(hotFunc, args,
-                sd.call->getType()->isVoidTy() ? "" : "fast.result");
-            directCall->setCallingConv(sd.call->getCallingConv());
-            builder.CreateBr(mergeBB);
-
-            // Slow path keeps the original indirect call (already in slowBB)
-
-            // If the call has a return value, create a PHI in mergeBB
-            if (!sd.call->getType()->isVoidTy()) {
-                builder.SetInsertPoint(&mergeBB->front());
-                auto* phi = builder.CreatePHI(sd.call->getType(), 2, "vtable.result");
-                phi->addIncoming(directCall, fastBB);
-                phi->addIncoming(sd.call, slowBB);
-                sd.call->replaceAllUsesWith(phi);
-                // Restore the PHI incoming from slow path (replaceAllUses changed it)
-                phi->setIncomingValue(1, sd.call);
-            }
-
-            ++annotated;
+        // Speculative devirtualization (guarded fast path) is DECLINED.
+        //
+        // The intended transform splits the call site and emits a guard that
+        // compares the object's loaded vtable pointer against the hot type's
+        // vtable, taking a direct call on the fast path. Emitting that guard
+        // correctly and safely requires three things this pass cannot
+        // currently guarantee, so we conservatively leave every candidate as
+        // its original indirect call (semantics-preserving):
+        //
+        //  1. Terminator call sites. An indirect `invoke` (a C++ virtual call
+        //     in an EH scope) is a terminator; splitting at its next node
+        //     dereferences a null pointer. The collection step already filters
+        //     to plain CallInst, but the guard below is declined regardless.
+        //  2. Correct guard target. The guard must compare against the vtable
+        //     ADDRESS-POINT (past the Itanium offset-to-top + RTTI header), not
+        //     the `_ZTV<name>` global base. The two differ by the header size,
+        //     so a base comparison is permanently false — a dead fast path and
+        //     an inflated stat. This pass has no reliable ABI model to derive
+        //     the address-point offset (it varies with pointer size and
+        //     inheritance shape).
+        //  3. Signature/attribute fidelity. The fast-path direct call must
+        //     match the indirect call's arity and carry its calling convention
+        //     plus parameter/return attributes (sret/byval/zeroext/...);
+        //     dropping them mis-ABIs the call.
+        //
+        // When a reliable address-point offset becomes available, re-enable a
+        // guarded fast path here that: rejects InvokeInst, checks
+        // arity/variadic compatibility against the target FunctionType, GEPs
+        // `_ZTV<name>` to the address-point for the guard, and copies
+        // setCallingConv + setAttributes onto the direct call.
+        for (const auto& sd : specDevirts) {
+            (void)sd; // candidate identified but not transformed (see above)
         }
     }
 
