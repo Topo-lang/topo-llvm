@@ -54,6 +54,7 @@ TEST(CABIContract, ParallelSymbols) {
     auto* fn_spawn_ret_pri = &topo_task_spawn_ret_pri;
     auto* fn_await = &topo_task_await;
     auto* fn_await_all = &topo_task_await_all;
+    auto* fn_detach = &topo_task_detach;
     auto* fn_init = &topo_parallel_init;
     auto* fn_shutdown = &topo_parallel_shutdown;
     auto* fn_ensure = &topo_parallel_ensure_init;
@@ -65,6 +66,7 @@ TEST(CABIContract, ParallelSymbols) {
     EXPECT_NE(fn_spawn_ret_pri, nullptr);
     EXPECT_NE(fn_await, nullptr);
     EXPECT_NE(fn_await_all, nullptr);
+    EXPECT_NE(fn_detach, nullptr);
     EXPECT_NE(fn_init, nullptr);
     EXPECT_NE(fn_shutdown, nullptr);
     EXPECT_NE(fn_ensure, nullptr);
@@ -88,6 +90,8 @@ TEST(CABIContract, ParallelSignatures) {
     SpawnRetPriFn spawn_ret_pri = &topo_task_spawn_ret_pri;
     AwaitFn await_fn = &topo_task_await;
     AwaitAllFn await_all = &topo_task_await_all;
+    using DetachFn = void (*)(topo_task_t*);
+    DetachFn detach_fn = &topo_task_detach;
     InitFn init = &topo_parallel_init;
     VoidFn shutdown_fn = &topo_parallel_shutdown;
     VoidFn ensure = &topo_parallel_ensure_init;
@@ -101,6 +105,7 @@ TEST(CABIContract, ParallelSignatures) {
     (void)spawn_ret_pri;
     (void)await_fn;
     (void)await_all;
+    (void)detach_fn;
     (void)init;
     (void)shutdown_fn;
     (void)ensure;

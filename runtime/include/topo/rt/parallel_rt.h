@@ -32,6 +32,10 @@ typedef struct topo_task topo_task_t;
 
 /// Spawn a fire-and-forget task.
 /// fn(arg) is executed on a worker thread.
+/// The returned handle owns a heap allocation that MUST be released exactly
+/// once: either by awaiting it (topo_task_await / topo_task_await_all) or, for
+/// genuine fire-and-forget use where the result is never awaited, by
+/// topo_task_detach(). Dropping the handle without either leaks the task.
 topo_task_t* topo_task_spawn(void (*fn)(void*), void* arg);
 
 /// Spawn a task that writes a result.
@@ -50,6 +54,14 @@ void topo_task_await(topo_task_t* task);
 
 /// Block until all tasks complete. Frees all task handles.
 void topo_task_await_all(topo_task_t** tasks, int count);
+
+/// Relinquish a spawned task handle without blocking ("fire-and-forget").
+/// Ownership of the handle's allocation transfers to the runtime: the task is
+/// freed when its body completes (or immediately, if it already has). After
+/// this call the handle is invalid — do not touch it or pass it to
+/// topo_task_await*. Use this instead of dropping a handle you will never
+/// await, which would leak the task.
+void topo_task_detach(topo_task_t* task);
 
 /// Initialize the parallel runtime with the given number of threads.
 /// Pass 0 to use hardware concurrency.

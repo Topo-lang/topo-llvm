@@ -42,6 +42,89 @@ TEST_F(ParallelRuntimeTest, SpawnAndAwaitSingleTask) {
     EXPECT_EQ(result, 42);
 }
 
+// ---- Fire-and-forget detach (task self-frees, no leak) ----
+//
+// topo_task_spawn documents "fire-and-forget", but await was historically the
+// only path that freed the handle, so a spawned-but-never-awaited task leaked.
+// topo_task_detach closes that: ownership transfers to the runtime and the
+// task frees itself once its body completes (or immediately if already done).
+// Under ASan/LSan a leak or double-free here is a hard failure; the side
+// effect (counter) proves the body still ran.
+
+TEST_F(ParallelRuntimeTest, DetachStillRunningTaskFreesAfterCompletion) {
+    // Detach while the body is (likely) still running: a ~10ms busy task is
+    // detached immediately after spawn. The worker must free it after the body
+    // finishes. We verify the body ran via a counter the test owns (the task
+    // allocation itself is reclaimed by the runtime, checked by ASan).
+    std::atomic<int> ran{0};
+    static std::atomic<int>* s_ran = nullptr;
+    s_ran = &ran;
+    auto body = [](void*) {
+        auto start = std::chrono::steady_clock::now();
+        volatile int sum = 0;
+        while (std::chrono::steady_clock::now() - start < std::chrono::milliseconds(10))
+            ++sum;
+        s_ran->fetch_add(1, std::memory_order_relaxed);
+    };
+    auto* task = topo_task_spawn(body, nullptr);
+    topo_task_detach(task);
+
+    // Give the worker time to run + self-free the detached task.
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (ran.load(std::memory_order_relaxed) == 0 &&
+           std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    EXPECT_EQ(ran.load(std::memory_order_relaxed), 1) << "detached task body never ran";
+}
+
+TEST_F(ParallelRuntimeTest, DetachAlreadyCompletedTaskFreesImmediately) {
+    // Detach AFTER the body has certainly completed: spawn a trivial task, let
+    // it finish, then detach. The worker ran run_task_safely while detached was
+    // still false (so it did not free), and the detacher must be the one to
+    // free — no leak, no double-free. The side-effect flag is atomic so the
+    // spin-wait read does not itself race the worker's write.
+    std::atomic<int> sink{0};
+    static std::atomic<int>* s_sink = nullptr;
+    s_sink = &sink;
+    auto body = [](void*) { s_sink->store(42, std::memory_order_release); };
+    auto* task = topo_task_spawn(body, nullptr);
+    // Spin-wait for the body's visible side effect so the task is surely done.
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (sink.load(std::memory_order_acquire) != 42 &&
+           std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    ASSERT_EQ(sink.load(std::memory_order_acquire), 42);
+    // A short extra pause makes it very likely the worker has returned from
+    // run_task_safely before we detach (exercises the done==true branch).
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    topo_task_detach(task); // frees here; ASan flags a double-free/leak otherwise
+    SUCCEED();
+}
+
+TEST_F(ParallelRuntimeTest, DetachManyTasksNoLeak) {
+    // Stress the handoff: detach a batch of tasks racing their own completion,
+    // so both arbitration branches (worker-frees / detacher-frees) get hit.
+    // ASan/LSan is the real assertion — this must finish with zero leaked task
+    // allocations and no double-free.
+    constexpr int N = 256;
+    std::atomic<int> ran{0};
+    static std::atomic<int>* s_ran2 = nullptr;
+    s_ran2 = &ran;
+    auto body = [](void*) { s_ran2->fetch_add(1, std::memory_order_relaxed); };
+    for (int i = 0; i < N; ++i) {
+        auto* task = topo_task_spawn(body, nullptr);
+        topo_task_detach(task);
+    }
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (ran.load(std::memory_order_relaxed) < N &&
+           std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    EXPECT_EQ(ran.load(std::memory_order_relaxed), N) << "some detached task bodies never ran";
+}
+
 // ---- Multiple tasks with await_all ----
 
 static void set_indexed(void* arg) {
@@ -293,6 +376,55 @@ TEST_F(ParallelRuntimeTest, ScopedResetClearsOnlyNamedPipeline) {
     EXPECT_EQ(after.count("pipeA"), 0u) << "pipeA pipeline key should be cleared";
     EXPECT_EQ(after.count("pipeA::stage1"), 0u) << "pipeA stage key should be cleared";
     EXPECT_GT(after.count("pipeB"), 0u) << "pipeB must survive a scoped reset of pipeA";
+}
+
+// ---- TLS teardown window (registered sample map outlives its owner thread) ----
+//
+// Each thread's cost-sample map is published into g_tls_registrations and read
+// cross-thread by get_cost_samples(). The map and its registration now live in
+// a SINGLE thread_local object whose destructor removes the registration BEFORE
+// the map is destroyed, so an aggregator can never dereference a
+// registered-but-destroyed map. This test exercises that window directly:
+// short-lived threads repeatedly record a sample and exit (running their TLS
+// destructor) while a reader thread hammers get_cost_samples(). Under TSan/ASan
+// a teardown-order regression surfaces as a data race / use-after-free.
+TEST_F(ParallelRuntimeTest, ConcurrentCostSampleAggregationDuringThreadExit) {
+    std::atomic<bool> stop{false};
+
+    // Reader: continuously aggregate samples across all registered maps.
+    std::thread reader([&stop]() {
+        uint64_t reads = 0;
+        while (!stop.load(std::memory_order_acquire)) {
+            auto s = topo::parallel::get_cost_samples();
+            (void)s;
+            ++reads;
+        }
+        (void)reads;
+    });
+
+    // Writers: many short-lived threads, each registers a TLS map (via
+    // topo_cost_begin/end), records a sample, then exits — running the TLS
+    // destructor that must unregister before tearing the map down.
+    for (int round = 0; round < 200; ++round) {
+        std::vector<std::thread> writers;
+        writers.reserve(8);
+        for (int t = 0; t < 8; ++t) {
+            writers.emplace_back([round, t]() {
+                std::string name = "tls::w" + std::to_string((round * 8 + t) % 4);
+                topo_cost_begin(name.c_str());
+                volatile int sum = 0;
+                for (int i = 0; i < 200; ++i) sum += i;
+                topo_cost_end(name.c_str());
+                // Thread exits here → TlsSampleRegistration destructor runs,
+                // unregistering the map while `reader` may be iterating.
+            });
+        }
+        for (auto& w : writers) w.join();
+    }
+
+    stop.store(true, std::memory_order_release);
+    reader.join();
+    SUCCEED(); // success == no TSan/ASan report and no crash
 }
 
 // ---- Priority-aware spawn ----

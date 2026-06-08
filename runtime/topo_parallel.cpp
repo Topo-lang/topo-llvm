@@ -28,6 +28,16 @@ struct topo_task {
     std::condition_variable cv;
     int priority = 2; // 0=Critical, 1=High, 2=Normal, 3=Low, 4=Background
 
+    // Fire-and-forget ownership handoff (see topo_task_detach). When a caller
+    // detaches a spawned task instead of awaiting it, ownership of the heap
+    // allocation transfers to whichever side finishes last: if the body is
+    // still running, the worker frees the task in run_task_safely after the
+    // body completes; if the body already finished, the detaching caller frees
+    // it. Both sides arbitrate under `mtx` so exactly one free happens. Without
+    // this, a spawned-but-never-awaited task leaks (await was the only path
+    // that freed the handle), contradicting the header's "fire-and-forget".
+    bool detached = false;
+
     // If task->work() throws, the worker / stealer captures the exception
     // here, marks done=true, and notifies awaiters — instead of letting
     // the exception escape the worker loop (which previously left `done`
@@ -56,10 +66,11 @@ struct PendingBegin {
 };
 
 static thread_local std::vector<PendingBegin> tls_pending_begins;
-static thread_local std::unordered_map<std::string, CostSample> tls_samples;
+
+using SampleMap = std::unordered_map<std::string, CostSample>;
 
 static std::mutex g_samples_mutex;
-static std::vector<std::unordered_map<std::string, CostSample>*> g_tls_registrations;
+static std::vector<SampleMap*> g_tls_registrations;
 // g_instrument is written under g_lifecycle_mutex in do_init() but read
 // lock-free on every worker thread in topo_parallel_cost_{begin,end}_impl.
 // A plain bool read concurrently with the write is a data race (UB); make it
@@ -67,24 +78,39 @@ static std::vector<std::unordered_map<std::string, CostSample>*> g_tls_registrat
 // the new value also sees the matching g_config publication.
 static std::atomic<bool> g_instrument{true};
 
-// Thread-local registration guard. Adds &tls_samples to g_tls_registrations
-// on first use; removes it on thread exit via its destructor so get_cost_samples()
-// never dereferences a freed TLS map.
+// Thread-local registration guard. The sample map lives INSIDE this object so
+// a single thread_local owns both the map and its registration, eliminating the
+// cross-object teardown window: previously `tls_samples` and `tls_registration`
+// were independent thread_locals, and the standard destroys thread_locals in
+// reverse order of construction completion. A worker enrols by touching
+// `tls_registration` first (its enrol() then takes the address of the separate
+// `tls_samples`, constructing it second), so `tls_samples` was destroyed BEFORE
+// `tls_registration`'s destructor ran — leaving a dangling `&tls_samples`
+// registered in g_tls_registrations for a window during which a concurrent
+// aggregator (get_cost_samples / reset_cost_samples) could dereference a
+// destroyed map. With the map embedded, the destructor first removes `&samples`
+// from the registry under g_samples_mutex and only then is `samples` itself torn
+// down, so no aggregator can ever observe a registered-but-destroyed map.
 struct TlsSampleRegistration {
+    SampleMap samples;
     bool registered = false;
 
     void enrol() {
         if (registered) return;
         std::lock_guard<std::mutex> lock(g_samples_mutex);
-        g_tls_registrations.push_back(&tls_samples);
+        g_tls_registrations.push_back(&samples);
         registered = true;
     }
 
     ~TlsSampleRegistration() {
-        if (!registered) return;
-        std::lock_guard<std::mutex> lock(g_samples_mutex);
-        auto& v = g_tls_registrations;
-        v.erase(std::remove(v.begin(), v.end(), &tls_samples), v.end());
+        if (registered) {
+            std::lock_guard<std::mutex> lock(g_samples_mutex);
+            auto& v = g_tls_registrations;
+            v.erase(std::remove(v.begin(), v.end(), &samples), v.end());
+        }
+        // `samples` is destroyed AFTER this body returns, i.e. after the
+        // registration is removed under the lock — so the unregister
+        // happens-before the map teardown.
     }
 };
 
@@ -188,22 +214,29 @@ struct ThreadPool {
     // was killed — turning any unhandled task exception into a DoS on
     // the whole pipeline.
     static void run_task_safely(topo_task* task) {
+        std::exception_ptr pending;
         try {
             task->work();
         } catch (...) {
-            // Stash the live exception so the awaiter rethrows it.
-            // We grab the task mutex before storing so the awaiter's
-            // wait-predicate recheck sees `exception` and `done` as a
-            // single atomic transition.
+            pending = std::current_exception();
+        }
+
+        // Complete + notify under task->mtx, and arbitrate detach ownership in
+        // the SAME critical section: if the task was detached while we were
+        // running, no awaiter exists, so the worker is the last owner and must
+        // free it. topo_task_detach takes this same lock, so exactly one side
+        // observes the other's flag and frees. We read `detached` before
+        // releasing the lock; if we free, no awaiter can be parked on this task
+        // (detach is mutually exclusive with await on a given handle).
+        bool freeHere;
+        {
             std::lock_guard<std::mutex> lock(task->mtx);
-            task->exception = std::current_exception();
+            if (pending) task->exception = std::move(pending);
             task->done.store(true, std::memory_order_release);
             task->cv.notify_all();
-            return;
+            freeHere = task->detached;
         }
-        std::lock_guard<std::mutex> lock(task->mtx);
-        task->done.store(true, std::memory_order_release);
-        task->cv.notify_all();
+        if (freeHere) delete task;
     }
 
     // Run a stolen task exactly as `worker_loop` would — body + done-notify
@@ -541,6 +574,33 @@ void topo_task_await_all(topo_task_t** tasks, int count) {
     if (first) std::rethrow_exception(first);
 }
 
+void topo_task_detach(topo_task_t* task) {
+    if (!task) return;
+    // Fire-and-forget: relinquish the handle without blocking. Ownership of the
+    // heap allocation is handed to whichever side finishes last (see the
+    // `detached` field on topo_task and run_task_safely):
+    //   * If the body already finished (done==true), the worker ran
+    //     run_task_safely while `detached` was still false, so it did NOT free
+    //     the task — the detacher is the last owner and frees it now.
+    //   * If the body is still running (done==false), set `detached` so the
+    //     worker frees the task when run_task_safely completes.
+    // Both paths take task->mtx (the same lock run_task_safely uses for its
+    // done+notify), so exactly one side frees. After this call the caller MUST
+    // NOT touch `task` again, and MUST NOT pass it to topo_task_await*.
+    bool freeNow;
+    {
+        std::lock_guard<std::mutex> lock(task->mtx);
+        if (task->done.load(std::memory_order_acquire)) {
+            // Worker already completed without freeing (it saw detached==false).
+            freeNow = true;
+        } else {
+            task->detached = true;
+            freeNow = false;
+        }
+    }
+    if (freeNow) delete task;
+}
+
 // Internal impls; the C ABI entry points topo_cost_begin / topo_cost_end
 // live in topo_cost.cpp so the linker can dead-strip them (and therefore
 // this .o's pull-in via the pass-emitted reference chain) when no pass
@@ -567,16 +627,18 @@ extern "C" void topo_parallel_cost_end_impl(const char* func_name) {
             auto duration_ns =
                 static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(end_tp - it->tp).count());
 
-            // tls_samples is published into g_tls_registrations and read /
-            // cleared cross-thread by get_cost_samples() / reset_cost_samples()
-            // under g_samples_mutex. The owning worker must take the SAME lock
-            // for its writes — otherwise an insert here can rehash buckets
-            // while an aggregator iterates this map (UB / torn reads), or race
-            // a concurrent clear()/erase(). The critical section is just the
-            // map mutation; tls_pending_begins stays thread-local and unlocked.
+            // tls_registration.samples is published into g_tls_registrations
+            // and read / cleared cross-thread by get_cost_samples() /
+            // reset_cost_samples() under g_samples_mutex. The owning worker must
+            // take the SAME lock for its writes — otherwise an insert here can
+            // rehash buckets while an aggregator iterates this map (UB / torn
+            // reads), or race a concurrent clear()/erase(). register_tls_samples
+            // above guarantees the map is enrolled before we write it. The
+            // critical section is just the map mutation; tls_pending_begins
+            // stays thread-local and unlocked.
             {
                 std::lock_guard<std::mutex> lock(g_samples_mutex);
-                auto& sample = tls_samples[name];
+                auto& sample = tls_registration.samples[name];
                 sample.name = name;
                 sample.total_ns += duration_ns;
                 sample.count++;

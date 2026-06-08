@@ -430,11 +430,26 @@ void shutdown() {
     // previous shutdown) do not leak across shutdown. This keeps shutdown
     // idempotent: calling it twice is safe, and it always leaves global
     // state equivalent to "never initialized".
-    std::lock_guard<std::mutex> lock(g_mutex);
-    g_pipelines.clear();
-    g_specializations.store(0, std::memory_order_relaxed);
-    g_deoptimizations.store(0, std::memory_order_relaxed);
-    g_activeJit.store(0, std::memory_order_relaxed);
+    //
+    // Drain the futures OUTSIDE the lock. Each PipelineEntry::jitFuture is a
+    // std::async(std::launch::async, ...) handle whose destructor blocks until
+    // the in-flight JIT compile finishes. Destroying g_pipelines under g_mutex
+    // would therefore hold the lock across that blocking wait, stalling every
+    // other adaptive call (register, stats, force_specialize) until the compile
+    // completes. Swap the vector out under the lock, release it, then let the
+    // local destruct: the futures drain with no lock held, and any concurrent
+    // caller that re-acquires g_mutex sees an already-empty g_pipelines.
+    std::vector<PipelineEntry> drained;
+    {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        drained.swap(g_pipelines);
+        g_specializations.store(0, std::memory_order_relaxed);
+        g_deoptimizations.store(0, std::memory_order_relaxed);
+        g_activeJit.store(0, std::memory_order_relaxed);
+    }
+    // `drained` destructs here, outside the lock, blocking on any in-flight
+    // jitFuture without holding g_mutex. The monitor thread is already joined
+    // (above), so no one else can touch these entries.
 }
 
 Stats stats() {
@@ -479,12 +494,27 @@ static PipelineEntry* findPipeline(const std::string& name) {
     return nullptr;
 }
 
+// True when the monitor has an in-flight async specialization for this entry
+// (state SPECIALIZING with a live jitFuture). force_specialize must not race
+// that: kicking off its own compile and committing would orphan the monitor's
+// jitFuture (a std::async handle whose destructor then blocks the eventual
+// PipelineEntry teardown) and double-compile the same pipeline. Caller holds
+// g_mutex.
+static bool monitorSpecializationInFlight(const PipelineEntry& entry) {
+    return entry.state == PipelineState::SPECIALIZING && entry.jitFuture.valid();
+}
+
 void force_specialize(const std::string& name) {
     std::unique_lock<std::mutex> lock(g_mutex);
 
     PipelineEntry* entry = findPipeline(name);
     if (!entry) return;
     if (entry->jitVersions >= g_config.max_versions) return;
+    // Defer to the monitor's in-flight specialization rather than overwriting
+    // its jitFuture. The monitor's SPECIALIZING case will consume that future
+    // and advance the state machine; a second compile here would be redundant
+    // and would orphan the monitor's async handle.
+    if (monitorSpecializationInFlight(*entry)) return;
 
     // Build the constraint context under the lock (reads cost samples + the
     // entry), then kick off the JIT future.
@@ -505,6 +535,10 @@ void force_specialize(const std::string& name) {
     // too — a concurrent specialization may have consumed it meanwhile.
     entry = findPipeline(name);
     if (!entry || entry->jitVersions >= g_config.max_versions) return;
+    // The monitor may have started its own specialization during the unlock
+    // window; if so, leave it to own the transition and drop our result rather
+    // than clobbering its in-flight jitFuture.
+    if (monitorSpecializationInFlight(*entry)) return;
     commitSpecialization(*entry, ptr);
 }
 
@@ -516,6 +550,8 @@ void force_specialize_bytes(const std::string& name,
     PipelineEntry* entry = findPipeline(name);
     if (!entry) return;
     if (entry->jitVersions >= g_config.max_versions) return;
+    // Defer to the monitor's in-flight specialization (see force_specialize).
+    if (monitorSpecializationInFlight(*entry)) return;
 
     auto costs = topo::parallel::get_cost_samples();
     auto ctx = buildConstraintsFromCosts(*entry, costs);
@@ -529,6 +565,9 @@ void force_specialize_bytes(const std::string& name,
 
     entry = findPipeline(name);
     if (!entry || entry->jitVersions >= g_config.max_versions) return;
+    // The monitor may have started its own specialization during the unlock
+    // window; defer to it rather than clobbering its in-flight jitFuture.
+    if (monitorSpecializationInFlight(*entry)) return;
     commitSpecialization(*entry, ptr);
 }
 

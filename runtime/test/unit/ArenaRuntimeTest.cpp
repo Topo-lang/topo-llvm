@@ -384,9 +384,20 @@ TEST(ArenaRuntimeTest, DifferentialAgainstMalloc) {
         EXPECT_EQ(reinterpret_cast<uintptr_t>(fromArena) % kAlign, 0u);
         EXPECT_EQ(reinterpret_cast<uintptr_t>(fromMalloc) % kAlign, 0u);
 
-        // Write the same payload through both and read back — byte-for-byte
-        // content must match. Any stray write or miscomputed padding in
-        // arena's alloc would manifest as a divergence here.
+        // Both allocators hand back UNINITIALIZED memory, and `Record` carries
+        // a trailing alignment-padding byte (uint64+uint32+uint16+uint8 = 15
+        // payload bytes inside a 16-byte struct) that a struct assignment does
+        // NOT write. Comparing the raw regions — or even comparing after only a
+        // struct assignment — reads that residual padding byte, so the result
+        // depends on prior heap/arena state and is order-dependent flaky.
+        //
+        // Make the comparison deterministic by writing a KNOWN pattern across
+        // the full region of both before writing the payload. The differential
+        // then tests behavior under writes (alignment, writability, byte
+        // fidelity of the struct store) rather than freshly-allocated garbage.
+        std::memset(fromArena, 0x5A, kSize);
+        std::memset(fromMalloc, 0x5A, kSize);
+
         Record payload{0xFEEDFACE00000000ull + static_cast<uint64_t>(i),
                        static_cast<uint32_t>(0xA5A50000u | i),
                        static_cast<uint16_t>(0x1000 + i),
