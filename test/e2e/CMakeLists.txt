@@ -149,7 +149,7 @@ include(${PROJECT_SOURCE_DIR}/cmake/TopoE2eProjectLocks.cmake)
 # CTest parses as a list), which is what actually registers the sub-labels.
 gtest_discover_tests(topo-e2e-functional DISCOVERY_TIMEOUT 30
     PROPERTIES
-        LABELS "e2e;functional"
+        LABELS "e2e\;functional"
         TIMEOUT 180
 )
 topo_inject_e2e_project_locks(
@@ -162,7 +162,7 @@ topo_inject_e2e_project_locks(
 
 gtest_discover_tests(topo-e2e-equivalence DISCOVERY_TIMEOUT 30
     PROPERTIES
-        LABELS "e2e;equivalence"
+        LABELS "e2e\;equivalence"
         TIMEOUT 300
 )
 topo_inject_e2e_project_locks(
@@ -211,7 +211,7 @@ set_tests_properties(e2e.decompile PROPERTIES LABELS "e2e;functional")
 include(GoogleTest)
 gtest_discover_tests(topo-e2e-pass-bench DISCOVERY_TIMEOUT 30
     PROPERTIES
-        LABELS "e2e;perf;benchmark"
+        LABELS "e2e\;perf\;benchmark"
         FIXTURES_REQUIRED "topo_bench_artifacts"
         RESOURCE_LOCK "topo_bench_measure"
         TIMEOUT 300

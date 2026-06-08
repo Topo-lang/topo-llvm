@@ -74,7 +74,7 @@ if(TOPO_ENABLE_LLVM AND TOPO_LLVM_BUILD_JIT_ENGINE)
         COMMENT "Copying topo-jit-engine alongside topo-runtime-tests")
 endif()
 
-gtest_discover_tests(topo-runtime-tests DISCOVERY_TIMEOUT 30 PROPERTIES LABELS "toolchain;runtime")
+gtest_discover_tests(topo-runtime-tests DISCOVERY_TIMEOUT 30 PROPERTIES LABELS "toolchain\;runtime")
 
 # Feature dimension labels
 set_property(DIRECTORY APPEND PROPERTY

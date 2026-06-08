@@ -73,7 +73,7 @@ topo_apply_std_pch_llvm(topo-llvm-unit-tests)
 set_property(TARGET topo-llvm-unit-tests PROPERTY JOB_POOL_LINK llvm_link)
 gtest_discover_tests(topo-llvm-unit-tests
     DISCOVERY_TIMEOUT 30
-    PROPERTIES LABELS "toolchain;ir" TIMEOUT 120 RESOURCE_LOCK "llvm_heavy")
+    PROPERTIES LABELS "toolchain\;ir" TIMEOUT 120 RESOURCE_LOCK "llvm_heavy")
 
 # ── Integration tests: Builder/Verifier/JIT/Adaptive ──────
 add_executable(topo-llvm-integration-tests
@@ -108,7 +108,7 @@ topo_apply_std_pch_llvm(topo-llvm-integration-tests)
 set_property(TARGET topo-llvm-integration-tests PROPERTY JOB_POOL_LINK llvm_link)
 gtest_discover_tests(topo-llvm-integration-tests
     DISCOVERY_TIMEOUT 30
-    PROPERTIES LABELS "toolchain;ir" TIMEOUT 120 RESOURCE_LOCK "llvm_heavy")
+    PROPERTIES LABELS "toolchain\;ir" TIMEOUT 120 RESOURCE_LOCK "llvm_heavy")
 
 # JIT tests need the engine DLL alongside the test binaries — gated on
 # TOPO_LLVM_BUILD_JIT_ENGINE so CI runs (with the shared lib OFF) skip

@@ -26,4 +26,4 @@ add_dependencies(topo-llvm-input-trust-tests
 topo_set_compiler_flags(topo-llvm-input-trust-tests)
 
 gtest_discover_tests(topo-llvm-input-trust-tests
-    PROPERTIES LABELS "toolchain;llvm" TIMEOUT 30)
+    PROPERTIES LABELS "toolchain\;llvm" TIMEOUT 30)
