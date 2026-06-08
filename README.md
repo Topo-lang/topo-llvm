@@ -119,13 +119,17 @@ target_link_libraries(my_app PRIVATE topo::llvm::topo-arena)
 The installed `topo-llvmConfig.cmake` emits a warning when it is loaded on
 Windows with a non-Clang / non-MSVC compiler.
 
-**Test / JIT coverage.** The unit + integration test suite and the JIT
-engine (`topo-jit-engine`) are **not built on Windows CI** yet: `lld-link`
-cannot expand the response file that references imported `topo::core::*`
-targets. The IR passes, runtime libraries, decompiler, and backend tools do
-build on Windows, but the test suite and JIT path are currently verified on
-Linux only — build and run the tests on Linux until that limitation is
-resolved.
+**Test / JIT coverage.** The full unit + integration test suite and the JIT
+engine (`topo-jit-engine`) build and run on all three CI platforms, **Windows
+included**. The earlier `lld-link` failure — it could not expand the response
+file referencing imported `topo::core::*` targets — was an ABI + CRT mismatch:
+the upstream `topo-core` / `topo-lang` / `topo-lang-cpp` builds defaulted to the
+GNU ABI and the dynamic CRT, while `topo-llvm` links MSVC-ABI, static-CRT
+objects. CI pins those upstream builds to the same bundled clang and
+`CMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded`; with that, `lld-link` resolves the
+`topo::core::*` symbols and the ~400 cases — including the JIT-engine
+integration tests — pass on `windows-2022`. Apply the same bundled-clang +
+static-CRT pin to reproduce the Windows test build locally.
 
 ## License
 
