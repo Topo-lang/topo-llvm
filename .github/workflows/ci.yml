@@ -567,6 +567,64 @@ jobs:
       - name: Build
         run: cmake --build build
 
+      # Relocatable-install gate (macOS). Proves the install-time install_name
+      # rewrite (topo_relocate_llvm_rpath in tools/*/CMakeLists.txt) makes a
+      # SHIPPED backend tool loadable on a different-layout host:
+      #   (1) the installed tool loads libLLVM via @rpath, not the build host's
+      #       absolute /opt/homebrew/... path;
+      #   (2) with the build-host (Cellar) rpath removed, dyld still resolves a
+      #       libLLVM bundled under ../lib purely through @loader_path/../lib —
+      #       i.e. genuine relocation, on a runner whose brew layout differs
+      #       from the dev machine that produced the issue.
+      # Installs ONLY the cpp backend tool via its own cmake_install.cmake
+      # (scoped + fast; avoids a full-tree install of the benchmark configure).
+      - name: Verify relocatable backend tool (@rpath libLLVM) (macos)
+        if: runner.os == 'macOS'
+        run: |
+          set -euo pipefail
+          PREFIX="${RUNNER_TEMP}/llvm-tools-reloc"
+          cmake -DCMAKE_INSTALL_PREFIX="$PREFIX" \
+                -P build/tools/topo-build-llvm-cpp/cmake_install.cmake
+          BIN="$PREFIX/bin/topo-build-llvm-cpp"
+          echo "::group::otool -L $BIN"; otool -L "$BIN"; echo "::endgroup::"
+          # (1) No absolute libLLVM load command may survive; it must be @rpath.
+          if otool -L "$BIN" | grep -E '^[[:space:]]+/.*/libLLVM[^ ]*\.dylib'; then
+            echo "FAIL: installed topo-build-llvm-cpp still loads libLLVM by absolute path"; exit 1
+          fi
+          otool -L "$BIN" | grep -qE '@rpath/libLLVM[^ ]*\.dylib' \
+            || { echo "FAIL: no @rpath/libLLVM load command"; exit 1; }
+          # (2) Cross-layout RUN: bundle libLLVM under ../lib, drop every build-host
+          #     rpath, and confirm the relocated binary actually loads + runs purely
+          #     via @loader_path/../lib. PASS is gated on the process surviving dyld
+          #     (rc<128, no 'Library not loaded'), NOT on a DYLD_PRINT_LIBRARIES line
+          #     that dyld emits BEFORE it validates the rest of the graph.
+          mkdir -p "$PREFIX/lib"
+          cp -L "$(brew --prefix llvm@22)/lib/libLLVM.dylib" "$PREFIX/lib/"
+          for rp in $(otool -l "$BIN" | awk '/LC_RPATH/{f=1} f&&/ path /{print $2; f=0}'); do
+            case "$rp" in @loader_path*) ;; *) install_name_tool -delete_rpath "$rp" "$BIN" || true ;; esac
+          done
+          echo "rpaths after stripping build-host entries:"
+          otool -l "$BIN" | awk '/LC_RPATH/{f=1} f&&/ path /{print "  "$2; f=0}'
+          set +e
+          out="$(DYLD_PRINT_LIBRARIES=1 "$BIN" --help </dev/null 2>&1)"; rc=$?
+          set -e
+          # Feed grep via here-string, NOT `printf "$out" | grep -q`: under
+          # `set -o pipefail`, grep -q closing the pipe early makes printf die of
+          # SIGPIPE and pipefail reports that 141 as the pipeline status — turning
+          # a successful match into a false failure (and a real error into a miss).
+          grep -iE '/lib/libLLVM[^ ]*\.dylib' <<<"$out" | head -1 || true
+          if grep -qiE 'Library not loaded|image not found|Symbol not found' <<<"$out"; then
+            echo "FAIL: dyld could not resolve a dependency from the bundled @loader_path/../lib"; exit 1
+          fi
+          if [ "$rc" -ge 128 ]; then
+            echo "FAIL: relocated binary died from signal (rc=$rc) — dyld load failure"; exit 1
+          fi
+          # Canonicalize: dyld prints the realpath (e.g. /tmp -> /private/tmp).
+          WANT="$(cd "$PREFIX/lib" && pwd -P)"
+          grep -qF "$WANT/libLLVM" <<<"$out" \
+            || { echo "FAIL: libLLVM not loaded from the bundled ../lib ($WANT)"; exit 1; }
+          echo "PASS: topo-build-llvm-cpp relocates — runs (rc=$rc) loading bundled libLLVM via @loader_path/../lib"
+
       # Co-locate the per-language backend tools next to the imported topo-build
       # (from the bootstrap install). The e2e tests invoke the INSTALLED
       # topo-build (RUNNER_TEMP/topo-install/bin), which resolves backend tools

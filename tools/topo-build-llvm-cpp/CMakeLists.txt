@@ -26,3 +26,7 @@ set_property(TARGET topo-build-llvm-cpp PROPERTY JOB_POOL_LINK llvm_link)
 install(TARGETS topo-build-llvm-cpp
     EXPORT topo-llvmTargets
     RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+
+# Relocatable install: rewrite the absolute libLLVM load command to @rpath so a
+# copied binary finds libLLVM via @loader_path/../lib instead of the build host.
+topo_relocate_llvm_rpath(topo-build-llvm-cpp libLLVM)
