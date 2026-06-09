@@ -504,6 +504,40 @@ jobs:
                 -DTOPO_LANG_RUST_ENABLE_LLVM=ON -DCMAKE_POSITION_INDEPENDENT_CODE=ON ${TOPO_WIN_CMAKE}
           cmake --build "${RUNNER_TEMP}/topo-lang-rust-build" --target install
 
+      # topo-debug-rust runtime-attach e2e — the acceptance for the un-stub:
+      # prove the Rust debug adapter launches a rustc-built target, attaches,
+      # reads rustc-emitted DWARF, and answers static + runtime reduction
+      # queries. Uses the just-installed topo-debug-rust + the bootstrapped
+      # topo-debug against the same tiny_vector fixture the monorepo e2e uses.
+      # ubuntu only: lldb pause/ptrace is unrestricted there, whereas a macOS
+      # dev-lldb attach can refuse to pause an unsigned process. libpython3.11
+      # (installed earlier in this job) is required by the bundled liblldb.
+      - name: topo-debug-rust runtime-attach e2e
+        if: runner.os == 'Linux'
+        run: |
+          set -euo pipefail
+          SRC="${RUNNER_TEMP}/topo-lang-rust-src/topo-debug/test/fixtures/tiny_vector.rs"
+          BIN="${RUNNER_TEMP}/tiny_vector_rs_bin"
+          rustc -C opt-level=0 -C debuginfo=2 -o "$BIN" "$SRC"
+          DBG="${RUNNER_TEMP}/topo-install/bin/topo-debug"
+          ADP="${RUNNER_TEMP}/topo-install/bin/topo-debug-rust"
+          run_q() { "$DBG" query "$1" --break tiny_vector.rs:19 --adapter "$ADP" --target "$BIN"; }
+          # static path (no pause needed)
+          for pair in "shape(vec)=[8]" "dtype(vec)=f64"; do
+            expr="${pair%=*}"; want="${pair#*=}"
+            got="$(run_q "$expr")"
+            echo "topo-debug-rust ${expr} => '${got}' (want '${want}')"
+            [ "$got" = "$want" ] || { echo "FAIL: ${expr} expected '${want}', got '${got}'"; exit 1; }
+          done
+          # runtime path: attach + pause + read array, reduce. 0.5+1.5+..+7.5 = 32
+          sumgot="$(run_q 'sum(vec)')"
+          echo "topo-debug-rust sum(vec) => '${sumgot}' (want 32)"
+          case "$sumgot" in
+            32|32.0|32.00|32.000) ;;
+            *) echo "FAIL: sum(vec) expected 32, got '${sumgot}'"; exit 1;;
+          esac
+          echo "topo-debug-rust runtime-attach e2e PASS"
+
       # topo-cli provides the `topo-build` executable the benchmark artifact
       # pre-build invokes. Installed after the lang plugins so its
       # find_package(topo-lang-*) picks them up.
