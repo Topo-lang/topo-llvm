@@ -14,6 +14,22 @@ fi
 VER=$(tr -d '[:space:]' < "$VERSION_FILE")
 echo "LLVM version: $VER"
 
+CHECKSUMS_FILE="$TOPO_LLVM_ROOT/.llvm-checksums"
+
+# Print the lowercase hex SHA-256 of "$1", using whatever tool is present
+# (sha256sum on Linux/Git-Bash, shasum on macOS, openssl as a last resort).
+sha256_of() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$1" | awk '{print $1}'
+    elif command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 "$1" | awk '{print $1}'
+    elif command -v openssl >/dev/null 2>&1; then
+        openssl dgst -sha256 "$1" | awk '{print $NF}'
+    else
+        echo "NO_SHA256_TOOL"
+    fi
+}
+
 LLVM_DIR="$TOPO_LLVM_ROOT/llvm-dev"
 
 # Check existing installation
@@ -103,6 +119,35 @@ trap 'rm -rf "$TMPDIR"' EXIT
 
 TARBALL="$TMPDIR/$ARCHIVE"
 curl -fSL --progress-bar -o "$TARBALL" "$URL"
+
+# Integrity gate: the bundled toolchain compiles and links every C++/Rust
+# artifact (and runs in CI), so a swapped release asset or a hijacked redirect
+# must never be trusted silently. Verify against the pinned SHA-256 before
+# extracting. See .llvm-checksums for how to regenerate the digests.
+EXPECTED_SHA=""
+if [ -f "$CHECKSUMS_FILE" ]; then
+    EXPECTED_SHA=$(awk -v f="$ARCHIVE" '$2 == f {print $1}' "$CHECKSUMS_FILE")
+fi
+if [ -n "$EXPECTED_SHA" ]; then
+    ACTUAL_SHA=$(sha256_of "$TARBALL")
+    if [ "$ACTUAL_SHA" = "NO_SHA256_TOOL" ]; then
+        echo "error: no sha256 tool (sha256sum/shasum/openssl) available to" >&2
+        echo "       verify $ARCHIVE; refusing to extract an unverified toolchain." >&2
+        exit 1
+    fi
+    if [ "$ACTUAL_SHA" = "$EXPECTED_SHA" ]; then
+        echo "SHA-256 verified: $ACTUAL_SHA"
+    else
+        echo "error: SHA-256 mismatch for $ARCHIVE — refusing to extract." >&2
+        echo "  expected: $EXPECTED_SHA" >&2
+        echo "  actual:   $ACTUAL_SHA" >&2
+        echo "  The download does not match the pin in .llvm-checksums." >&2
+        exit 1
+    fi
+else
+    echo "warning: no pinned SHA-256 for '$ARCHIVE' in .llvm-checksums;" >&2
+    echo "         toolchain integrity is NOT verified for this platform." >&2
+fi
 
 echo "Extracting to llvm-dev/ ..."
 mkdir -p "$LLVM_DIR"
