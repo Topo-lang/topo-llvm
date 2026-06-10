@@ -625,6 +625,56 @@ jobs:
             || { echo "FAIL: libLLVM not loaded from the bundled ../lib ($WANT)"; exit 1; }
           echo "PASS: topo-build-llvm-cpp relocates — runs (rc=$rc) loading bundled libLLVM via @loader_path/../lib"
 
+      # Relocatable-install gate (Linux) — ELF analogue of the macOS gate:
+      # topo_relocate_llvm_rpath appends $ORIGIN/../lib to the installed
+      # RUNPATH so a libLLVM.so bundled next to the tool resolves without
+      # LD_LIBRARY_PATH on a host whose LLVM lives elsewhere. Verifies:
+      #   (1) the installed tool's dynamic section carries $ORIGIN/../lib
+      #       (proves the cmake change actually lands on the binary);
+      #   (2) with every OTHER runpath stripped (patchelf) and libLLVM.so
+      #       bundled under ../lib, the tool still loads and runs — and ldd
+      #       resolves libLLVM from the bundled dir, i.e. genuine relocation.
+      - name: Verify relocatable backend tool ($ORIGIN libLLVM) (linux)
+        if: runner.os == 'Linux'
+        run: |
+          set -euo pipefail
+          sudo apt-get install -y -qq patchelf
+          PREFIX="${RUNNER_TEMP}/llvm-tools-reloc"
+          cmake -DCMAKE_INSTALL_PREFIX="$PREFIX" \
+                -P build/tools/topo-build-llvm-cpp/cmake_install.cmake
+          BIN="$PREFIX/bin/topo-build-llvm-cpp"
+          echo "::group::readelf -d $BIN (dynamic section)"
+          readelf -d "$BIN" | grep -E 'RUNPATH|RPATH' || true
+          echo "::endgroup::"
+          # (1) The installed RUNPATH must contain $ORIGIN/../lib.
+          readelf -d "$BIN" | grep -E 'R(UN)?PATH' | grep -qF '$ORIGIN/../lib' \
+            || { echo "FAIL: installed RUNPATH lacks \$ORIGIN/../lib"; exit 1; }
+          # (2) Bundle the exact libLLVM the tool needs, strip every non-$ORIGIN
+          #     runpath, and prove the tool runs resolving it from ../lib only.
+          mkdir -p "$PREFIX/lib"
+          need="$(ldd "$BIN" | awk '/libLLVM/{print $1; exit}')"
+          src="$(ldd "$BIN" | awk '/libLLVM/{print $3; exit}')"
+          if [ -z "$need" ] || [ -z "$src" ]; then
+            # Statically linked LLVM on this runner: no runtime relocation to
+            # prove, and (1) already pinned the RUNPATH contract.
+            echo "NOTE: no shared libLLVM dependency (static link) — bundled-load proof skipped"
+            exit 0
+          fi
+          cp -L "$src" "$PREFIX/lib/$need"
+          patchelf --set-rpath '$ORIGIN/../lib' "$BIN"
+          resolved="$(env -u LD_LIBRARY_PATH ldd "$BIN" | awk '/libLLVM/{print $3; exit}')"
+          echo "libLLVM resolves to: $resolved"
+          case "$resolved" in
+            "$PREFIX/lib/"*) ;;
+            *) echo "FAIL: libLLVM not resolved from the bundled ../lib"; exit 1 ;;
+          esac
+          env -u LD_LIBRARY_PATH "$BIN" --help </dev/null >/dev/null 2>&1 || rc=$?
+          rc=${rc:-0}
+          if [ "$rc" -ge 126 ]; then
+            echo "FAIL: relocated binary failed to load (rc=$rc)"; exit 1
+          fi
+          echo "PASS: topo-build-llvm-cpp relocates — runs (rc=$rc) loading bundled libLLVM via \$ORIGIN/../lib"
+
       # Co-locate the per-language backend tools next to the imported topo-build
       # (from the bootstrap install). The e2e tests invoke the INSTALLED
       # topo-build (RUNNER_TEMP/topo-install/bin), which resolves backend tools

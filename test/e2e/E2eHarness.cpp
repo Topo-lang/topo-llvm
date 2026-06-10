@@ -131,7 +131,16 @@ RunResult E2eFixture::topoBuild(const std::string& projectName,
     // "pass fired" from "pass was trivially skipped". Cost is marginal (one
     // textual .ll write per build); E2E builds already write object files
     // and link binaries.
-    auto r = platform::runProcessCapture(exe, {"--dump-ir"}, workDir);
+    //
+    // Always --no-check: these suites verify the BACKEND pipeline (codegen /
+    // passes / equivalence), not declaration conformance — the checker has
+    // its own suites. Since topo-core gained auto-check-when-optimizing
+    // (CheckMode::Auto runs topo-check whenever a force-mode optimization is
+    // enabled), every force-mode fixture here would otherwise be gated on
+    // check-clean declarations, which the codegen-coverage fixtures are not.
+    // The explicit opt-out prints topo-build's UNVERIFIED warning to stderr;
+    // that is expected noise in e2e logs.
+    auto r = platform::runProcessCapture(exe, {"--dump-ir", "--no-check"}, workDir);
     // Merge stderr into the result: topo-build prints the ninja frontend
     // progress to stdout, but the BACKEND tool's diagnostics (`error: backend
     // tool '…' failed`, `error: linking failed`, a missing -L/-l, a crash) go
