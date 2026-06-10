@@ -89,6 +89,23 @@ target_link_libraries(topo-e2e-perf PRIVATE E2eHarnessLlvm)
 add_executable(topo-e2e-pass-bench PassBenchmarkTests.cpp)
 target_link_libraries(topo-e2e-pass-bench PRIVATE E2eHarnessLlvm)
 
+# --- ThreadSanitizer backstop ---
+#
+# Builds the known-wrong tsan_race fixture (force-parallel + check=off over a
+# racy declaration) with -fsanitize=thread injected, runs it, and asserts TSan
+# trips on the forced variant while the serial variant runs clean. The fixture
+# lives under THIS dir's fixtures/ (NOT benchmarks/), so the bench-artifacts
+# glob in benchmarks/CMakeLists.txt never enumerates it and no equivalence /
+# functional registry references it — it is exercised only by this binary.
+add_executable(topo-e2e-tsan TsanBackstopTests.cpp)
+target_link_libraries(topo-e2e-tsan PRIVATE E2eHarnessLlvm)
+# Needs the cpp backend tool (the build dispatches to it) plus the parallel +
+# pass-event runtime archives the forced build auto-links. topo-build itself is
+# the imported topo-cli target (file-dep flows via the TOPO_BUILD_EXE define).
+add_dependencies(topo-e2e-tsan topo-build-llvm-cpp topo-parallel topo-pass-event)
+target_compile_definitions(topo-e2e-tsan PRIVATE
+    TOPO_E2E_TSAN_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/tsan_race")
+
 # --- topo-bench-artifacts (real pre-build) ---
 #
 # Register every benchmark project under topo-llvm/benchmarks/ for
@@ -183,6 +200,24 @@ set_tests_properties(e2e.perf e2e.decompile PROPERTIES
     TIMEOUT 300)
 set_tests_properties(e2e.perf      PROPERTIES LABELS "e2e;perf")
 set_tests_properties(e2e.decompile PROPERTIES LABELS "e2e;functional")
+
+# ThreadSanitizer backstop — discovered per-TEST_F. Each case builds + runs in a
+# private temp copy of the fixture, so no per-project RESOURCE_LOCK is needed for
+# correctness; it shares the global "topo_e2e_build" lock with perf/decompile so
+# the TSan build does not contend for cores with the other inline-building e2e
+# suites under `ctest -j N` (CPU starvation could let the runtime's work-helping
+# await drain both tasks on one thread and mask the race). Labelled "e2e" so the
+# benchmark+e2e job's `ctest -L e2e --label-exclude "perf|benchmark"` runs it;
+# "perf"/"benchmark" are deliberately absent so it is never treated as a timing
+# bench. A single-element extra label avoids the multi-label LABELS mis-parse
+# documented for gtest_discover_tests above.
+include(GoogleTest)
+gtest_discover_tests(topo-e2e-tsan DISCOVERY_TIMEOUT 30
+    PROPERTIES
+        LABELS "e2e"
+        RESOURCE_LOCK "topo_e2e_build"
+        TIMEOUT 300
+)
 
 # --- per-case benchmark discovery ---
 #

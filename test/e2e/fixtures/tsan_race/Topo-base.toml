@@ -1,0 +1,22 @@
+# tsan_race — serial inverse leg. Identical sources + identical (wrong)
+# declaration, but [parallel] mode = "off" so TopoParallelPass never fires and
+# the calls stay sequential on one thread. Built with the same
+# -fsanitize=thread injection, this variant runs ThreadSanitizer-CLEAN with a
+# zero exit and a deterministic counter total. It proves the race surfaced by
+# the forced variant comes from the parallel transform trusting the wrong
+# declaration — not from anything inherently racy in the fixture itself.
+
+[project]
+name = "tsan_race"
+
+[topo]
+root = "topo/main.topo"
+
+[build]
+sources = ["src/*.cpp"]
+standard = "c++17"
+output = "tsan_race_base"
+check = "off"
+
+[parallel]
+mode = "off"

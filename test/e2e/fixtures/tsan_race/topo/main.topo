@@ -1,0 +1,31 @@
+// tsan_race — deliberately WRONG parallel declaration (TSan backstop fixture).
+//
+// bump_a and bump_b are declared as independent same-stage siblings (both fed
+// by seed, both feeding total), licensing TopoParallelPass to spawn them
+// concurrently under [parallel] mode = "force". The host bodies violate that
+// declaration: both do unsynchronized read-modify-writes on one shared
+// global. topo-check would reject this project; the fixture builds with
+// check = "off" (the explicit opt-out) so the dynamic ThreadSanitizer lane is
+// the only detector left — proving the runtime backstop catches what the
+// checker was told not to look at.
+
+using int = std::cpp17::int;
+
+namespace racy {
+  public:
+    int run_pair(int iters);
+
+    fn run_pair {
+      seed -> bump_a;
+      seed -> bump_b;
+      bump_a -> total;
+      bump_b -> total;
+      total -> std::cpp17::int;
+    }
+
+  protected:
+    seed(int iters) -> int;
+    bump_a(int iters) -> int;
+    bump_b(int iters) -> int;
+    total(int a, int b) -> int;
+}
