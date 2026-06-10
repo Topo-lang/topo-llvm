@@ -1,11 +1,13 @@
 #include "topo/jit.h"
 #include "topo/parallel.h"
 #include "topo/rt/jit_engine_rt.h"
+#include "topo/rt/jit_engine_resolve.h"
 #include "topo/Platform/SharedLibrary.h"
 #include "topo/Platform/Platform.h"
 
 #include <atomic>
 #include <cstdint>
+#include <cstdlib>
 #include <mutex>
 #include <sstream>
 #include <string>
@@ -166,19 +168,20 @@ bool loadEngine() {
 
     g_engine.triedLoad = true;
 
-    // Search order: alongside executable, then system PATH
+    // Resolve the engine to an anchored path only. We deliberately do NOT fall
+    // back to loading the bare library name: that would let the OS loader search
+    // CWD / LD_LIBRARY_PATH / DYLD_* and load an attacker-planted engine into a
+    // process running user code. See topo/rt/jit_engine_resolve.h.
     g_engineLib = new platform::SharedLibrary();
     std::string exeDir = platform::getExecutableDir();
-    bool found = false;
     std::string libName = engineLibName();
-
-    if (!exeDir.empty()) {
-        std::string fullPath = exeDir + "/" + libName;
-        found = g_engineLib->load(fullPath);
-    }
-
-    if (!found) {
-        found = g_engineLib->load(libName);
+    const char* envOverride = std::getenv("TOPO_JIT_ENGINE");
+    bool found = false;
+    for (const auto& candidate : detail::engineSearchCandidates(exeDir, libName, envOverride)) {
+        if (g_engineLib->load(candidate)) {
+            found = true;
+            break;
+        }
     }
 
     if (!found) {
