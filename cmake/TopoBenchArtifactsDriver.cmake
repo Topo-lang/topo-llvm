@@ -87,8 +87,10 @@ function(_topo_run_build label)
     message(STATUS "[topo-bench-artifacts] ${PROJECT_DIR}: ${label}")
     # Clean .topo-cache so swapped toml doesn't reuse stale artefacts.
     file(REMOVE_RECURSE "${_cache_dir}")
+    # --no-check: benchmark projects are codegen-coverage fixtures, not
+    # check-clean declaration sets; conformance has its own checker suites.
     execute_process(
-        COMMAND "${TOPO_BUILD_EXE}" --dump-ir
+        COMMAND "${TOPO_BUILD_EXE}" --dump-ir --no-check
         WORKING_DIRECTORY "${PROJECT_DIR}"
         RESULT_VARIABLE _rc
         OUTPUT_VARIABLE _out
@@ -121,8 +123,9 @@ function(_topo_build_variant label variant_toml)
     set(_build_failed FALSE)
     message(STATUS "[topo-bench-artifacts] ${PROJECT_DIR}: ${label}")
     file(REMOVE_RECURSE "${_cache_dir}")
+    # --no-check: same rationale as _topo_run_build above.
     execute_process(
-        COMMAND "${TOPO_BUILD_EXE}" --dump-ir
+        COMMAND "${TOPO_BUILD_EXE}" --dump-ir --no-check
         WORKING_DIRECTORY "${PROJECT_DIR}"
         RESULT_VARIABLE _rc
         OUTPUT_VARIABLE _out
