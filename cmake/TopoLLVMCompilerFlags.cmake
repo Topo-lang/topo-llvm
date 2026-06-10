@@ -81,15 +81,24 @@ function(topo_set_llvm_flags target)
     endif()
 endfunction()
 
-# Make an installed LLVM-linked tool relocatable on macOS. Adds an
+# Make an installed LLVM-linked tool relocatable. macOS: adds an
 # @loader_path/../lib rpath (so a dylib bundled next to the tool resolves) and
 # rewrites the build-host-absolute libLLVM/libclang load command to
 # @rpath/<basename> at install time (see cmake/RelocateLLVMDylib.cmake).
 # `pattern` is the dylib basename stem to rewrite (libLLVM | libclang).
-# No-op off APPLE (ELF resolves the soname through rpath already). Call this
-# AFTER the target's install(TARGETS) so the rewrite runs on the installed copy.
+# Linux (ELF): appends $ORIGIN/../lib to the installed RUNPATH so a bundled
+# libLLVM.so resolves relative to the tool — no load-command rewrite needed,
+# the dynamic linker resolves the DT_NEEDED soname through the runpath.
+# (CMAKE_INSTALL_RPATH_USE_LINK_PATH still appends the build-host LLVM lib
+# dir afterwards as a dev fallback on both platforms.) No-op on Windows (DLL
+# search has no rpath; PATH / app-dir rules apply). Call this AFTER the
+# target's install(TARGETS) so the macOS rewrite runs on the installed copy.
 function(topo_relocate_llvm_rpath target pattern)
+    if(WIN32)
+        return()
+    endif()
     if(NOT APPLE)
+        set_property(TARGET ${target} APPEND PROPERTY INSTALL_RPATH "\$ORIGIN/../lib")
         return()
     endif()
     # @loader_path/../lib first (relocation-safe); CMAKE_INSTALL_RPATH_USE_LINK_PATH
