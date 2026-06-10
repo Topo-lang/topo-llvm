@@ -132,7 +132,7 @@ jobs:
           # v5: upstream rebuilt with the bundled clang + static CRT on Windows
           # (ABI + RuntimeLibrary fix); earlier GNU-ABI / dynamic-CRT installs
           # must not be reused.
-          key: topo-upstream-${{ env.TOPO_CORE_REF }}-${{ env.TOPO_LANG_REF }}-${{ env.TOPO_LANG_CPP_REF }}-${{ matrix.os }}-v5-crt
+          key: topo-upstream-${{ env.TOPO_CORE_REF }}-${{ env.TOPO_LANG_REF }}-${{ env.TOPO_LANG_CPP_REF }}-${{ matrix.os }}-v6-crt
 
       - name: Build & install topo-core (zero-LLVM, lang-less)
         if: steps.upstream-cache.outputs.cache-hit != 'true'
