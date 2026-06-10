@@ -65,3 +65,11 @@ install(TARGETS topo-jit-engine
     LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
     RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
 )
+
+# Relocatable install: rewrite the absolute libLLVM load command to @rpath so a
+# relocated engine resolves a bundled libLLVM. The engine installs into lib/
+# (jit-api dlopens it from <exeDir>/../lib via its anchored-path search), so a
+# bundled libLLVM.dylib would sit NEXT to it — DESTINATION makes the relocation
+# rpath @loader_path rather than the bin-tool @loader_path/../lib. On Windows
+# the .dll lands in bin/ instead, but the helper is a no-op there anyway.
+topo_relocate_llvm_rpath(topo-jit-engine libLLVM DESTINATION ${CMAKE_INSTALL_LIBDIR})

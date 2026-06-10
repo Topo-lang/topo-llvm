@@ -554,7 +554,9 @@ jobs:
           cmake --build "${RUNNER_TEMP}/topo-cli-build" --target install
 
       # Reconfigure THIS checkout with tools + benchmarks ON now that lang-cpp/
-      # -rust LLVM scope + topo-cli are in the prefix.
+      # -rust LLVM scope + topo-cli are in the prefix. BUILD_PROF is ON so the
+      # relocatable-install gate below can cover topo-prof (a user-facing CLI
+      # with the same libLLVM load-command defect class as the backend tools).
       - name: Configure topo-llvm (tools + benchmarks)
         run: |
           cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
@@ -562,68 +564,134 @@ jobs:
               -DCMAKE_TOOLCHAIN_FILE="${VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake" \
               -DTOPO_LLVM_BUILD_TOOLS=ON -DTOPO_LLVM_BUILD_BENCHMARKS=ON \
               -DTOPO_LLVM_BUILD_TESTS=ON -DTOPO_LLVM_BUILD_JIT_ENGINE=ON \
+              -DTOPO_LLVM_BUILD_PROF=ON \
               -DCMAKE_POSITION_INDEPENDENT_CODE=ON ${TOPO_WIN_CMAKE}
 
       - name: Build
         run: cmake --build build
 
       # Relocatable-install gate (macOS). Proves the install-time install_name
-      # rewrite (topo_relocate_llvm_rpath in tools/*/CMakeLists.txt) makes a
-      # SHIPPED backend tool loadable on a different-layout host:
-      #   (1) the installed tool loads libLLVM via @rpath, not the build host's
-      #       absolute /opt/homebrew/... path;
-      #   (2) with the build-host (Cellar) rpath removed, dyld still resolves a
-      #       libLLVM bundled under ../lib purely through @loader_path/../lib —
-      #       i.e. genuine relocation, on a runner whose brew layout differs
-      #       from the dev machine that produced the issue.
-      # Installs ONLY the cpp backend tool via its own cmake_install.cmake
+      # rewrite (topo_relocate_llvm_rpath) makes the SHIPPED libLLVM-linked
+      # artifacts loadable on a different-layout host:
+      #   (1) each installed artifact loads libLLVM via @rpath, not the build
+      #       host's absolute /opt/homebrew/... path, and carries NO versioned
+      #       Cellar LLVM rpath (the install step canonicalizes the
+      #       USE_LINK_PATH dev fallback to the stable …/opt/llvm*/lib form);
+      #   (2) with the build-host rpaths removed, dyld still resolves a libLLVM
+      #       bundled at the relocation rpath (@loader_path/../lib for bin/
+      #       tools, @loader_path for the lib/ dylib) — i.e. genuine relocation,
+      #       on a runner whose brew layout differs from the dev machine that
+      #       produced the issue.
+      # Covers topo-build-llvm-cpp + topo-prof (run gate: process survives
+      # dyld, rc<128, no 'Library not loaded') and libtopo-jit-engine.dylib
+      # (no CLI entry point — an RTLD_NOW dlopen probe of the ABSOLUTE
+      # installed path forces dyld to resolve its full load graph, mirroring
+      # jit-api's anchored-path search which never dlopens a bare name).
+      # Installs ONLY the needed subdirs via their own cmake_install.cmake
       # (scoped + fast; avoids a full-tree install of the benchmark configure).
-      - name: Verify relocatable backend tool (@rpath libLLVM) (macos)
+      - name: Verify relocatable LLVM artifacts (@rpath libLLVM) (macos)
         if: runner.os == 'macOS'
         run: |
           set -euo pipefail
           PREFIX="${RUNNER_TEMP}/llvm-tools-reloc"
-          cmake -DCMAKE_INSTALL_PREFIX="$PREFIX" \
-                -P build/tools/topo-build-llvm-cpp/cmake_install.cmake
-          BIN="$PREFIX/bin/topo-build-llvm-cpp"
-          echo "::group::otool -L $BIN"; otool -L "$BIN"; echo "::endgroup::"
-          # (1) No absolute libLLVM load command may survive; it must be @rpath.
-          if otool -L "$BIN" | grep -E '^[[:space:]]+/.*/libLLVM[^ ]*\.dylib'; then
-            echo "FAIL: installed topo-build-llvm-cpp still loads libLLVM by absolute path"; exit 1
-          fi
-          otool -L "$BIN" | grep -qE '@rpath/libLLVM[^ ]*\.dylib' \
-            || { echo "FAIL: no @rpath/libLLVM load command"; exit 1; }
-          # (2) Cross-layout RUN: bundle libLLVM under ../lib, drop every build-host
-          #     rpath, and confirm the relocated binary actually loads + runs purely
-          #     via @loader_path/../lib. PASS is gated on the process surviving dyld
-          #     (rc<128, no 'Library not loaded'), NOT on a DYLD_PRINT_LIBRARIES line
-          #     that dyld emits BEFORE it validates the rest of the graph.
+          for sub in tools/topo-build-llvm-cpp tools/topo-prof lib/JitEngine; do
+            cmake -DCMAKE_INSTALL_PREFIX="$PREFIX" -P "build/$sub/cmake_install.cmake"
+          done
           mkdir -p "$PREFIX/lib"
           cp -L "$(brew --prefix llvm@22)/lib/libLLVM.dylib" "$PREFIX/lib/"
-          for rp in $(otool -l "$BIN" | awk '/LC_RPATH/{f=1} f&&/ path /{print $2; f=0}'); do
-            case "$rp" in @loader_path*) ;; *) install_name_tool -delete_rpath "$rp" "$BIN" || true ;; esac
+
+          # (1) Static assertions on the installed Mach-O.
+          assert_relocatable() { # <mach-o path>
+            local f="$1"
+            echo "::group::otool -L $f"; otool -L "$f"; echo "::endgroup::"
+            if otool -L "$f" | grep -E '^[[:space:]]+/.*/libLLVM[^ ]*\.dylib'; then
+              echo "FAIL: $f still loads libLLVM by absolute path"; exit 1
+            fi
+            otool -L "$f" | grep -qE '@rpath/libLLVM[^ ]*\.dylib' \
+              || { echo "FAIL: $f has no @rpath/libLLVM load command"; exit 1; }
+            # No exact-patch Homebrew keg may survive as an rpath — the install
+            # step rewrites …/Cellar/llvm*/<ver>/lib to the stable opt form.
+            if otool -l "$f" | grep -E 'path .*/Cellar/llvm[^/]*/[0-9]'; then
+              echo "FAIL: $f still carries a versioned Cellar LLVM rpath"; exit 1
+            fi
+          }
+          strip_nonloader_rpaths() { # <mach-o path>
+            local f="$1"
+            for rp in $(otool -l "$f" | awk '/LC_RPATH/{p=1} p&&/ path /{print $2; p=0}'); do
+              case "$rp" in @loader_path*) ;; *) install_name_tool -delete_rpath "$rp" "$f" || true ;; esac
+            done
+            echo "rpaths of $f after stripping build-host entries:"
+            otool -l "$f" | awk '/LC_RPATH/{p=1} p&&/ path /{print "  "$2; p=0}'
+          }
+          # (2) Cross-layout RUN gate for a bin/ tool: with only @loader_path
+          # rpaths left, the tool must load + run from the bundled ../lib.
+          # PASS is gated on the process surviving dyld (rc<128, no 'Library
+          # not loaded'), NOT on a DYLD_PRINT_LIBRARIES line that dyld emits
+          # BEFORE it validates the rest of the graph.
+          run_reloc_tool() { # <tool path> <label>
+            local bin="$1" label="$2" out rc
+            set +e
+            out="$(DYLD_PRINT_LIBRARIES=1 "$bin" --help </dev/null 2>&1)"; rc=$?
+            set -e
+            # Feed grep via here-string, NOT `printf "$out" | grep -q`: under
+            # `set -o pipefail`, grep -q closing the pipe early makes printf die
+            # of SIGPIPE and pipefail reports that 141 as the pipeline status —
+            # turning a successful match into a false failure (and a real error
+            # into a miss).
+            grep -iE '/lib/libLLVM[^ ]*\.dylib' <<<"$out" | head -1 || true
+            if grep -qiE 'Library not loaded|image not found|Symbol not found' <<<"$out"; then
+              echo "FAIL: $label — dyld could not resolve a dependency from the bundled @loader_path/../lib"; exit 1
+            fi
+            if [ "$rc" -ge 128 ]; then
+              echo "FAIL: $label died from signal (rc=$rc) — dyld load failure"; exit 1
+            fi
+            # Canonicalize: dyld prints the realpath (e.g. /tmp -> /private/tmp).
+            local want; want="$(cd "$PREFIX/lib" && pwd -P)"
+            grep -qF "$want/libLLVM" <<<"$out" \
+              || { echo "FAIL: $label did not load libLLVM from the bundled ../lib ($want)"; exit 1; }
+            echo "PASS: $label relocates — runs (rc=$rc) loading bundled libLLVM via @loader_path/../lib"
+          }
+
+          for tool in topo-build-llvm-cpp topo-prof; do
+            BIN="$PREFIX/bin/$tool"
+            assert_relocatable "$BIN"
+            strip_nonloader_rpaths "$BIN"
+            run_reloc_tool "$BIN" "$tool"
           done
-          echo "rpaths after stripping build-host entries:"
-          otool -l "$BIN" | awk '/LC_RPATH/{f=1} f&&/ path /{print "  "$2; f=0}'
+
+          # libtopo-jit-engine.dylib: assert + dlopen probe. The bundled
+          # libLLVM sits NEXT to the engine in lib/, so its relocation rpath
+          # must be @loader_path (not the bin-tool @loader_path/../lib).
+          ENGINE="$PREFIX/lib/libtopo-jit-engine.dylib"
+          assert_relocatable "$ENGINE"
+          otool -l "$ENGINE" | awk '/LC_RPATH/{p=1} p&&/ path /{print $2; p=0}' | grep -qx '@loader_path' \
+            || { echo "FAIL: engine dylib lacks the @loader_path rpath"; exit 1; }
+          strip_nonloader_rpaths "$ENGINE"
+          cat > "${RUNNER_TEMP}/dlopen-probe.c" <<'EOF'
+          #include <dlfcn.h>
+          #include <stdio.h>
+          int main(int argc, char** argv) {
+            if (argc < 2) return 2;
+            void* h = dlopen(argv[1], RTLD_NOW | RTLD_LOCAL);
+            if (!h) { fprintf(stderr, "dlopen failed: %s\n", dlerror()); return 1; }
+            dlclose(h);
+            puts("dlopen OK");
+            return 0;
+          }
+          EOF
+          cc -o "${RUNNER_TEMP}/dlopen-probe" "${RUNNER_TEMP}/dlopen-probe.c"
           set +e
-          out="$(DYLD_PRINT_LIBRARIES=1 "$BIN" --help </dev/null 2>&1)"; rc=$?
+          out="$(DYLD_PRINT_LIBRARIES=1 "${RUNNER_TEMP}/dlopen-probe" "$ENGINE" 2>&1)"; rc=$?
           set -e
-          # Feed grep via here-string, NOT `printf "$out" | grep -q`: under
-          # `set -o pipefail`, grep -q closing the pipe early makes printf die of
-          # SIGPIPE and pipefail reports that 141 as the pipeline status — turning
-          # a successful match into a false failure (and a real error into a miss).
           grep -iE '/lib/libLLVM[^ ]*\.dylib' <<<"$out" | head -1 || true
-          if grep -qiE 'Library not loaded|image not found|Symbol not found' <<<"$out"; then
-            echo "FAIL: dyld could not resolve a dependency from the bundled @loader_path/../lib"; exit 1
+          if [ "$rc" -ne 0 ]; then
+            echo "$out"
+            echo "FAIL: dlopen of relocated libtopo-jit-engine.dylib failed (rc=$rc)"; exit 1
           fi
-          if [ "$rc" -ge 128 ]; then
-            echo "FAIL: relocated binary died from signal (rc=$rc) — dyld load failure"; exit 1
-          fi
-          # Canonicalize: dyld prints the realpath (e.g. /tmp -> /private/tmp).
           WANT="$(cd "$PREFIX/lib" && pwd -P)"
           grep -qF "$WANT/libLLVM" <<<"$out" \
-            || { echo "FAIL: libLLVM not loaded from the bundled ../lib ($WANT)"; exit 1; }
-          echo "PASS: topo-build-llvm-cpp relocates — runs (rc=$rc) loading bundled libLLVM via @loader_path/../lib"
+            || { echo "FAIL: engine did not load libLLVM from the bundled lib/ ($WANT)"; exit 1; }
+          echo "PASS: libtopo-jit-engine.dylib relocates — dlopen(RTLD_NOW) loads bundled libLLVM via @loader_path"
 
       # Relocatable-install gate (Linux) — ELF analogue of the macOS gate:
       # topo_relocate_llvm_rpath appends $ORIGIN/../lib to the installed

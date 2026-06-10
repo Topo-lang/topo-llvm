@@ -159,8 +159,27 @@ else()
     message(STATUS "LLVM link mode: static archives (no libLLVM.dylib in this distribution)")
 endif()
 
-# Export LLVM bin directory for runtime tool resolution
-set(TOPO_LLVM_BINDIR "${LLVM_TOOLS_BINARY_DIR}" CACHE PATH "LLVM bin dir")
+# Export LLVM bin directory for runtime tool resolution.
+# Heal a dangling cache entry first: a versioned Homebrew Cellar path cached
+# before a `brew upgrade llvm` patch bump no longer exists — re-derive instead
+# of failing later at build/test time on the vanished keg.
+if(DEFINED CACHE{TOPO_LLVM_BINDIR} AND NOT EXISTS "${TOPO_LLVM_BINDIR}")
+    message(STATUS "topo-llvm: cached TOPO_LLVM_BINDIR dangles (${TOPO_LLVM_BINDIR}) — re-deriving")
+    unset(TOPO_LLVM_BINDIR CACHE)
+endif()
+# Canonicalize a versioned Homebrew Cellar keg to its stable opt symlink
+# (…/Cellar/llvm/22.1.7/bin → …/opt/llvm/bin): the value is baked into tools
+# as the compile-time dev fallback (TOPO_LLVM_BINDIR define) and cached here,
+# so the unversioned form keeps both valid across LLVM patch bumps and keeps
+# exact-version Cellar strings out of shipped binaries.
+set(_TOPO_LLVM_BINDIR_DETECTED "${LLVM_TOOLS_BINARY_DIR}")
+if(_TOPO_LLVM_BINDIR_DETECTED MATCHES "^(.+)/Cellar/(llvm[^/]*)/[^/]+/(.+)$")
+    set(_TOPO_LLVM_BINDIR_STABLE "${CMAKE_MATCH_1}/opt/${CMAKE_MATCH_2}/${CMAKE_MATCH_3}")
+    if(EXISTS "${_TOPO_LLVM_BINDIR_STABLE}")
+        set(_TOPO_LLVM_BINDIR_DETECTED "${_TOPO_LLVM_BINDIR_STABLE}")
+    endif()
+endif()
+set(TOPO_LLVM_BINDIR "${_TOPO_LLVM_BINDIR_DETECTED}" CACHE PATH "LLVM bin dir")
 
 # Version check against .llvm-version
 if(EXISTS "${TOPO_LLVM_SOURCE_DIR}/.llvm-version")

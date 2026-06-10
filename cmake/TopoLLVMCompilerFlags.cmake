@@ -81,43 +81,75 @@ function(topo_set_llvm_flags target)
     endif()
 endfunction()
 
-# Make an installed LLVM-linked tool relocatable. macOS: adds an
-# @loader_path/../lib rpath (so a dylib bundled next to the tool resolves) and
-# rewrites the build-host-absolute libLLVM/libclang load command to
-# @rpath/<basename> at install time (see cmake/RelocateLLVMDylib.cmake).
-# `pattern` is the dylib basename stem to rewrite (libLLVM | libclang).
-# Linux (ELF): appends $ORIGIN/../lib to the installed RUNPATH so a bundled
-# libLLVM.so resolves relative to the tool — no load-command rewrite needed,
-# the dynamic linker resolves the DT_NEEDED soname through the runpath.
-# (CMAKE_INSTALL_RPATH_USE_LINK_PATH still appends the build-host LLVM lib
-# dir afterwards as a dev fallback on both platforms.) No-op on Windows (DLL
-# search has no rpath; PATH / app-dir rules apply). Call this AFTER the
-# target's install(TARGETS) so the macOS rewrite runs on the installed copy.
+# Make an installed LLVM-linked Mach-O/ELF artifact relocatable. Usage:
+#   topo_relocate_llvm_rpath(<target> <pattern> [DESTINATION <install-subdir>])
+# `pattern` is the dylib basename stem to rewrite (libLLVM | libclang | liblldb).
+# DESTINATION is the artifact's install subdir as given to install(TARGETS);
+# default ${CMAKE_INSTALL_BINDIR} (executables). Pass the LIBDIR for an
+# installed shared library (e.g. libtopo-jit-engine.dylib) — a lib/ artifact
+# expects bundled dylibs NEXT to itself (rpath @loader_path / $ORIGIN) instead
+# of in the sibling lib dir (@loader_path/../lib / $ORIGIN/../lib).
+# macOS: prepends the relocation rpath (kept FIRST, ahead of any pre-set dev
+# fallback and the build-host LLVM lib dir appended by
+# CMAKE_INSTALL_RPATH_USE_LINK_PATH), rewrites the build-host-absolute
+# lib<pattern> load command to @rpath/<basename> at install time, and
+# canonicalizes a versioned Homebrew Cellar LLVM rpath to its stable /opt
+# form (see cmake/RelocateLLVMDylib.cmake).
+# Linux (ELF): prepends the $ORIGIN-relative runpath so a bundled libLLVM.so
+# resolves relative to the artifact — no load-command rewrite needed, the
+# dynamic linker resolves the DT_NEEDED soname through the runpath.
+# No-op on Windows (DLL search has no rpath; PATH / app-dir rules apply).
+# Call this AFTER the target's install(TARGETS) so the macOS rewrite runs on
+# the installed copy.
 function(topo_relocate_llvm_rpath target pattern)
     if(WIN32)
         return()
     endif()
-    if(NOT APPLE)
-        set_property(TARGET ${target} APPEND PROPERTY INSTALL_RPATH "\$ORIGIN/../lib")
-        return()
+    cmake_parse_arguments(_reloc "" "DESTINATION" "" ${ARGN})
+    set(_dest "${_reloc_DESTINATION}")
+    if(NOT _dest)
+        set(_dest "${CMAKE_INSTALL_BINDIR}")
+        if(NOT _dest)
+            set(_dest "bin")
+        endif()
     endif()
-    # @loader_path/../lib first (relocation-safe); CMAKE_INSTALL_RPATH_USE_LINK_PATH
-    # still appends the build-host LLVM lib dir afterwards as a dev fallback.
-    set_property(TARGET ${target} APPEND PROPERTY INSTALL_RPATH "@loader_path/../lib")
-    set(_bindir "${CMAKE_INSTALL_BINDIR}")
-    if(NOT _bindir)
-        set(_bindir "bin")
+    # Artifacts installed into the lib dir find bundled dylibs NEXT to
+    # themselves; anything else (bin/ tools) finds them in the sibling ../lib.
+    if(_dest STREQUAL "${CMAKE_INSTALL_LIBDIR}" OR _dest STREQUAL "lib")
+        set(_rpath_apple "@loader_path")
+        set(_rpath_elf "\$ORIGIN")
+    else()
+        set(_rpath_apple "@loader_path/../lib")
+        set(_rpath_elf "\$ORIGIN/../lib")
+    endif()
+    if(APPLE)
+        set(_rpath_reloc "${_rpath_apple}")
+    else()
+        set(_rpath_reloc "${_rpath_elf}")
+    endif()
+    # PREPEND the relocation rpath so it stays first even when the target
+    # already declares a build-host dev fallback in INSTALL_RPATH.
+    get_target_property(_rpath_prev ${target} INSTALL_RPATH)
+    if(_rpath_prev)
+        set_target_properties(${target} PROPERTIES
+            INSTALL_RPATH "${_rpath_reloc};${_rpath_prev}")
+    else()
+        set_target_properties(${target} PROPERTIES INSTALL_RPATH "${_rpath_reloc}")
+    endif()
+    if(NOT APPLE)
+        return()
     endif()
     # Resolve the installed path the SAME way CMake's own install(TARGETS) does:
     # $ENV{DESTDIR} + (absolute DESTINATION as-is | CMAKE_INSTALL_PREFIX-joined),
     # both deferred to install time. Without the DESTDIR prefix a staged install
     # (DESTDIR=, distro/Homebrew packaging) writes to $DESTDIR$PREFIX/bin but this
     # script would look at $PREFIX/bin, miss the file, and silently skip the
-    # rewrite — shipping a non-relocatable binary.
-    if(IS_ABSOLUTE "${_bindir}")
-        set(_reloc_bin "\$ENV{DESTDIR}${_bindir}/${target}")
+    # rewrite — shipping a non-relocatable binary. $<TARGET_FILE_NAME:…> (not
+    # the bare target name) so SHARED libraries resolve to lib<name>.dylib.
+    if(IS_ABSOLUTE "${_dest}")
+        set(_reloc_bin "\$ENV{DESTDIR}${_dest}/$<TARGET_FILE_NAME:${target}>")
     else()
-        set(_reloc_bin "\$ENV{DESTDIR}\${CMAKE_INSTALL_PREFIX}/${_bindir}/${target}")
+        set(_reloc_bin "\$ENV{DESTDIR}\${CMAKE_INSTALL_PREFIX}/${_dest}/$<TARGET_FILE_NAME:${target}>")
     endif()
     install(CODE
 "set(TOPO_RELOC_BINARY \"${_reloc_bin}\")

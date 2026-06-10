@@ -12,6 +12,13 @@ if(NOT TOPO_LLVM_BINDIR)
     message(FATAL_ERROR "TOPO_LLVM_BINDIR not set — JIT bitcode fixture requires bundled LLVM clang.")
 endif()
 
+# Heal a dangling cache entry (a versioned Homebrew Cellar path cached before
+# an LLVM patch bump) so reconfigure re-probes instead of invoking a vanished
+# clang++.
+if(_TOPO_CLANGXX AND NOT EXISTS "${_TOPO_CLANGXX}")
+    unset(_TOPO_CLANGXX CACHE)
+endif()
+
 find_program(_TOPO_CLANGXX clang++
     PATHS "${TOPO_LLVM_BINDIR}"
     NO_DEFAULT_PATH)
