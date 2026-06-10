@@ -9,6 +9,7 @@ set(_TOPO_RUNTIME_TEST_SOURCES
     unit/ParallelRuntimeTest.cpp
     unit/JITContextTest.cpp
     unit/JITApiStubTest.cpp
+    unit/JITEngineResolveTest.cpp
     unit/JITEdgeCaseTest.cpp
     unit/AdaptiveMonitorTest.cpp
     unit/ObserveRuntimeTest.cpp
