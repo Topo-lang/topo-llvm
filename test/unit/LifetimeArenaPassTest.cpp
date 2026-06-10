@@ -1,5 +1,6 @@
-// Regression coverage for LifetimeArenaPass memory-safety fixes
-// (see .aidesk/live/40-issue/llvm-lifetimearena-use-after-free.md).
+// Regression coverage for LifetimeArenaPass memory-safety fixes: the pass
+// used to arena-convert allocations whose slot address escapes (and to keep
+// stale analysis state across functions), producing use-after-free IR.
 //
 // These cases drive LifetimeArenaPass::run() over hand-built modules and
 // assert on the rewritten IR. They focus on three correctness properties
