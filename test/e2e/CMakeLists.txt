@@ -129,6 +129,29 @@ target_compile_definitions(topo-e2e-tsan PRIVATE
 # visible to the aggregate target declared in a sibling scope, so the topo-llvm
 # registrations live in the root scope alongside topo-jvm's.
 
+# --- CTest fixture provider for `topo_bench_artifacts` (standalone) ---
+# CTest treats a fixture with no FIXTURES_SETUP test as legal and SILENTLY
+# runs FIXTURES_REQUIRED tests without it (the harness then falls back to
+# slow inline per-case builds). Meta-only contract: in the meta union,
+# topo-jvm/test/e2e/CMakeLists.txt registers the single shared provider
+# (configured before this file — meta adds topo-jvm before
+# topo-llvm/tools-late), so this block is skipped there via
+# TOPO_META_DRIVING_TESTS to keep exactly one provider. Standalone
+# topo-llvm self-provides: benchmarks/ (configured just before this dir in
+# both layouts) already created the `topo-bench-artifacts` aggregate.
+# Caveat: a partial meta (TOPO_META_ALLOW_PARTIAL=ON, no topo-jvm clone)
+# with LLVM benchmarks ON would again lack a provider — local-only, exotic.
+if(NOT TOPO_META_DRIVING_TESTS)
+    add_test(NAME topo_bench_artifacts_build
+        COMMAND ${CMAKE_COMMAND}
+                --build ${CMAKE_BINARY_DIR}
+                --target topo-bench-artifacts)
+    set_tests_properties(topo_bench_artifacts_build PROPERTIES
+        FIXTURES_SETUP "topo_bench_artifacts"
+        TIMEOUT 3600
+        LABELS "bench_fixture")
+endif()
+
 # --- B5: Decompile Round-trip ---
 add_executable(topo-e2e-decompile DecompileTests.cpp)
 target_link_libraries(topo-e2e-decompile PRIVATE E2eHarnessLlvm TopoDecompile)
@@ -231,9 +254,11 @@ gtest_discover_tests(topo-e2e-tsan DISCOVERY_TIMEOUT 30
 # existing `scripts/test.sh perf` filtering continues to work unchanged.
 #
 # Split-responsibility locking:
-#   - Pre-build: CMake-level cross-project parallelism via `topo_bench_artifacts`
-#     setup fixture (defined in the JVM CMakeLists because both LLVM and JVM
-#     share the fixture name). Keeps fc96660's 22min → 460s artifact-build win.
+#   - Pre-build: CMake-level cross-project parallelism via the
+#     `topo_bench_artifacts` setup fixture. Provider split: standalone
+#     registers the in-repo provider above (bench-artifacts section); in the
+#     meta union topo-jvm/test/e2e registers the single shared provider and
+#     the in-repo one is skipped via TOPO_META_DRIVING_TESTS.
 #   - Measurement: CTest-level serialisation via `topo_bench_measure` lock.
 #     Benchmarks time CPU-bound subprocess runs; `ctest -j N` without a
 #     measurement lock lets concurrent bench binaries contend for cores and
