@@ -19,7 +19,11 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  TOPO_CORE_REF: main
+  # TOPO_CORE_REF / TOPO_LANG_CPP_REF (and the benchmark job's TOPO_CLI_REF /
+  # TOPO_LANG_RUST_REF) are temporarily pinned to dev: the [build.cpp].flags
+  # chain (BuildConfig::cppFlags) lands across topo-core / topo-cli /
+  # topo-lang-cpp in lockstep. Restore to main once those merge.
+  TOPO_CORE_REF: dev
   # topo-llvm core links topo::core::TopoBuildLib (lib/Build) which is
   # gated behind find_package(topo-lang) in topo-core. Install topo-lang
   # too so the topo-core re-install includes lib/Build in its export.
@@ -30,7 +34,7 @@ env:
   # in topo-lang-cpp/runtime/include/topo/ and are always installed under
   # the default scope. find_path(TOPO_LANG_CPP_RUNTIME_INCLUDE) in
   # topo-llvm/CMakeLists.txt picks them up from the install prefix.
-  TOPO_LANG_CPP_REF: main
+  TOPO_LANG_CPP_REF: dev
 
 jobs:
   # ── Core scope build + test ────────
@@ -132,7 +136,10 @@ jobs:
           # v5: upstream rebuilt with the bundled clang + static CRT on Windows
           # (ABI + RuntimeLibrary fix); earlier GNU-ABI / dynamic-CRT installs
           # must not be reused.
-          key: topo-upstream-${{ env.TOPO_CORE_REF }}-${{ env.TOPO_LANG_REF }}-${{ env.TOPO_LANG_CPP_REF }}-${{ matrix.os }}-v6-crt
+          # v7: topo-core BuildConfig gained cppFlags + topo-lang-cpp's
+          # CppDriver consumes it; the backend tools' main.cpp references the
+          # new field, so a stale cached install header no longer compiles.
+          key: topo-upstream-${{ env.TOPO_CORE_REF }}-${{ env.TOPO_LANG_REF }}-${{ env.TOPO_LANG_CPP_REF }}-${{ matrix.os }}-v7-crt
 
       - name: Build & install topo-core (zero-LLVM, lang-less)
         if: steps.upstream-cache.outputs.cache-hit != 'true'
@@ -338,8 +345,10 @@ jobs:
         # build-and-test job proves); first windows iterations are blind.
         os: [ubuntu-24.04, macos-14, windows-2022]
     env:
-      TOPO_LANG_RUST_REF: main
-      TOPO_CLI_REF: main
+      # Pinned to dev with the top-level TOPO_CORE_REF / TOPO_LANG_CPP_REF —
+      # see the comment on the workflow env block.
+      TOPO_LANG_RUST_REF: dev
+      TOPO_CLI_REF: dev
     steps:
       - uses: actions/checkout@v5
       # ninja + clangd are required. libpython3.11 is also required: the
@@ -759,14 +768,31 @@ jobs:
              build/tools/topo-build-llvm-mixed/topo-build-llvm-mixed${ext} \
              "${RUNNER_TEMP}/topo-install/bin/"
 
+      # Standalone smoke for the `topo_bench_artifacts` FIXTURES_SETUP
+      # provider: running the provider test by name proves it is registered in
+      # a standalone configure AND that the bench prebuild pipeline works
+      # end-to-end here. Linux + nightly/dispatch only — the prebuild compiles
+      # every registered benchmark variant (tens of minutes), which must never
+      # gate a PR (see the job comment above).
+      - name: Bench-artifacts fixture provider (standalone smoke)
+        if: matrix.os == 'ubuntu-24.04' && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+        run: |
+          # Same PATH defence-in-depth as the Test step: bundled llvm-dev/bin
+          # (clang-22) ahead of the runner's system clang. --no-tests=error:
+          # a filtered-out provider would otherwise exit 0 and the smoke
+          # would be vacuous (ctest returns 0 when -R matches nothing).
+          export PATH="${{ github.workspace }}/llvm-dev/bin:${PATH}"
+          ctest --test-dir build -R '^topo_bench_artifacts_build$' --no-tests=error --output-on-failure
+
       # Deterministic gate: e2e functional + equivalence + pass-fired, with the
       # wall-clock TIMING benches EXCLUDED (--label-exclude "perf|benchmark").
       # The timing suite serializes via the topo_bench_measure resource lock and
       # runs 10 interleaved rounds per case → 40-90 min and prone to hangs on a
       # shared runner (not a reliable regression signal there), so it is NOT a
       # CI gate. Run it manually instead:
-      #   cmake --build build --target topo-bench-artifacts   # pre-build variants
-      #   ctest --test-dir build -L benchmark                 # measure
+      #   ctest --test-dir build -L benchmark   # measure — the topo_bench_artifacts
+      #   fixture provider pre-builds the variants first; a manual
+      #   `cmake --build build --target topo-bench-artifacts` stays optional
       # Equivalence builds its variants on-demand (no pre-build needed here) and
       # proves each pass fires AND preserves behavior (timing stripped).
       # No stdlib-header shim: the benchmark Topo.toml files reference the
