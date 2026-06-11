@@ -18,3 +18,10 @@ min_tasks_to_parallelize = 2
 mode = "force"
 partition = true
 reduction = true
+
+# Benchmark scaffolding and toolchain runtime symbols (topo::*/topo_*/__topo_*)
+# are outside the .topo contract.
+[completeness]
+ignore_constructors = true
+ignore_destructors = true
+ignore_patterns = ["topo::*", "topo_*", "__topo_*"]

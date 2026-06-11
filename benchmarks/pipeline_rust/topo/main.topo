@@ -11,7 +11,7 @@ namespace pipeline_rust {
       decode -> detect;
       enhance -> compose;
       detect -> compose;
-      compose -> i32;
+      compose -> void;
     }
 
   protected:

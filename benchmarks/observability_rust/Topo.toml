@@ -12,3 +12,10 @@ output = "observability_rust"
 [observability]
 mode = "force"
 exporter = "stdout"
+
+# Benchmark scaffolding and toolchain runtime symbols (topo::*/topo_*/__topo_*)
+# are outside the .topo contract.
+[completeness]
+ignore_constructors = true
+ignore_destructors = true
+ignore_patterns = ["topo::*", "topo_*", "__topo_*"]

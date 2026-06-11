@@ -9,3 +9,29 @@ sources = ["src/*.cpp"]
 include = ["include"]
 standard = "c++17"
 output = "class_template_constraint"
+
+# Benchmark scaffolding symbols are outside the .topo contract.
+[completeness]
+ignore_constructors = true
+ignore_destructors = true
+ignore_patterns = [
+    "approx",
+    "collection::Vector",
+    "collection::Vector::at",
+    "collection::Vector::push_back",
+    "collection::Vector::size",
+    "friendly_bench",
+    "traits::TypeTraits",
+    "traits::TypeTraits::is_floating",
+    "traits::TypeTraits::is_integral",
+    "traits::clamp",
+    "traits::double_add",
+    "traits::double_multiply",
+    "traits::is_floating",
+    "traits::is_integral",
+    "traits::is_pointer",
+    "traits::max_value",
+    "traits::pointer_size",
+    "traits::sum",
+    "unfriendly_bench",
+]

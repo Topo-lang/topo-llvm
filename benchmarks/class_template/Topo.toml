@@ -9,3 +9,25 @@ sources = ["src/*.cpp"]
 include = ["include", "../../../topo-lang-cpp/runtime/include", "../../runtime/include"]
 standard = "c++17"
 output = "class_template"
+
+# Benchmark scaffolding and toolchain runtime symbols (topo::*/topo_*/__topo_*)
+# are outside the .topo contract.
+[completeness]
+ignore_constructors = true
+ignore_destructors = true
+ignore_patterns = [
+    "topo::*",
+    "topo_*",
+    "__topo_*",
+    "approx",
+    "c",
+    "collection::HashMap::Entry",
+    "collection::Point::print_impl",
+    "friendly_bench",
+    "meta::Wider",
+    "meta::factorial",
+    "pt",
+    "traits::double_add",
+    "traits::double_multiply",
+    "unfriendly_bench",
+]

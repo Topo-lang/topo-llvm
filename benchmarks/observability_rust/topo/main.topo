@@ -8,7 +8,7 @@ namespace observability_rust {
     fn execute {
       parse -> validate;
       validate -> transform;
-      transform -> i32;
+      transform -> void;
     }
 
   protected:

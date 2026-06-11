@@ -12,3 +12,15 @@ output = "ownership"
 
 [optimize.indirection]
 mode = "auto"
+
+# Benchmark scaffolding symbols are outside the .topo contract.
+[completeness]
+ignore_constructors = true
+ignore_destructors = true
+ignore_patterns = [
+    "Node",
+    "Texture",
+    "bench",
+    "friendly_work",
+    "unfriendly_work",
+]

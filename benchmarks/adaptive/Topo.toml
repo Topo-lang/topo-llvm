@@ -19,3 +19,31 @@ instrument = true
 
 [adaptive]
 mode = "auto"
+
+# Benchmark scaffolding and toolchain runtime symbols (topo::*/topo_*/__topo_*)
+# are outside the .topo contract.
+[completeness]
+ignore_constructors = true
+ignore_destructors = true
+ignore_patterns = [
+    "topo::*",
+    "topo_*",
+    "__topo_*",
+    "benchmark",
+    "r1",
+    "r2",
+    "r3",
+    "r4",
+    "results",
+    "runBasicScenarios",
+    "runDeoptScenario",
+    "runMultiPipelineScenario",
+    "s1",
+    "s2",
+    "s3",
+    "s4",
+    "w1",
+    "w2",
+    "w3",
+    "w4",
+]

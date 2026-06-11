@@ -12,3 +12,17 @@ output = "ownership_unfriendly"
 
 [optimize.indirection]
 mode = "auto"
+
+# Benchmark scaffolding symbols are outside the .topo contract.
+[completeness]
+ignore_constructors = true
+ignore_destructors = true
+ignore_patterns = [
+    "Texture",
+    "bench",
+    "drain_registered",
+    "get_sink",
+    "opaque_sink",
+    "register_texture",
+    "unfriendly_work",
+]

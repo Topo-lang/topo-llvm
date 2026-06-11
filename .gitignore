@@ -10,6 +10,9 @@ vcpkg_installed/
 llvm-dev
 llvm-dev/
 
+# topo-check incremental cache (written into the project source dir)
+.topo-check-cache
+
 # Editor / OS junk
 .DS_Store
 *.swp
