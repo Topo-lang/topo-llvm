@@ -61,6 +61,28 @@ static bool expectStringIfPresent(const nlohmann::json& extras, const char* key)
     return true;
 }
 
+/// Expect `backendExtras[key]` to be a JSON array of strings (when present).
+/// Mirrors the mixed backend's mixedConfig sub-array validation. Absent key
+/// is OK.
+static bool expectArrayOfStringsIfPresent(const nlohmann::json& extras, const char* key) {
+    if (!extras.contains(key)) return true;
+    const auto& arr = extras.at(key);
+    if (!arr.is_array()) {
+        std::cerr << "error: backendExtras." << key
+                  << ": expected array, got " << arr.type_name() << "\n";
+        return false;
+    }
+    for (size_t i = 0; i < arr.size(); ++i) {
+        if (!arr[i].is_string()) {
+            std::cerr << "error: backendExtras." << key
+                      << "[" << i << "]: expected string, got "
+                      << arr[i].type_name() << "\n";
+            return false;
+        }
+    }
+    return true;
+}
+
 int main(int argc, char* argv[]) {
     if (argc < 2) {
         std::cerr << "Usage: " << argv[0] << " <request.json>\n"
@@ -94,12 +116,18 @@ int main(int argc, char* argv[]) {
     // than a downstream `clang: argument has invalid type` diagnostic.
     if (!expectStringIfPresent(req.backendExtras, "hostCompilerPath")) return 1;
     if (!expectStringIfPresent(req.backendExtras, "standard")) return 1;
+    if (!expectArrayOfStringsIfPresent(req.backendExtras, "cppFlags")) return 1;
 
     // ================================================================
     // Step 3: Compile C++ sources to LLVM IR
     // ================================================================
     std::string hostCompiler = req.backendExtras.value("hostCompilerPath", std::string());
     std::string standard = req.backendExtras.value("standard", std::string("c++17"));
+    // [build.cpp].flags — free-form clang++ flags, applied at both the
+    // compile-to-IR and the link invocation (CppDriver appends them after
+    // the built-in args, so user flags win on conflicts).
+    std::vector<std::string> cppFlags =
+        req.backendExtras.value("cppFlags", std::vector<std::string>{});
 
     topo::build::BuildConfig compileCfg;
     compileCfg.language = topo::HostLanguage::Cpp;
@@ -107,6 +135,7 @@ int main(int argc, char* argv[]) {
     compileCfg.includeDirs = req.includeDirs;
     compileCfg.hostCompilerPath = hostCompiler.empty() ? topo::platform::llvmClangxx() : hostCompiler;
     compileCfg.standard = standard;
+    compileCfg.cppFlags = cppFlags;
     compileCfg.outputType = req.config.outputType;
     compileCfg.embedIR = req.config.embedIR;
     compileCfg.adaptiveCfg = req.config.adaptiveCfg;
@@ -264,6 +293,7 @@ int main(int argc, char* argv[]) {
     linkCfg.buildMode = req.config.buildMode;
     linkCfg.hostCompilerPath = hostCompiler.empty() ? topo::platform::llvmClangxx() : hostCompiler;
     linkCfg.standard = standard;
+    linkCfg.cppFlags = cppFlags;
     linkCfg.linkLibs = req.linkLibs;
     linkCfg.linkDirs = req.linkDirs;
     linkCfg.verbose = req.verbose;

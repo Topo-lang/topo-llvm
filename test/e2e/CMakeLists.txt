@@ -106,6 +106,19 @@ add_dependencies(topo-e2e-tsan topo-build-llvm-cpp topo-parallel topo-pass-event
 target_compile_definitions(topo-e2e-tsan PRIVATE
     TOPO_E2E_TSAN_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/tsan_race")
 
+# --- [build.cpp].flags passthrough ---
+#
+# Builds the cpp_flags fixture (a plain-cpp project whose source #errors
+# without -DTOPO_E2E_FLAGS_PROOF) and asserts the Topo.toml flags array
+# reaches both the compile-to-IR and the link clang invocation. Like
+# tsan_race, the fixture lives under THIS dir's fixtures/ so the
+# bench-artifacts glob never enumerates it.
+add_executable(topo-e2e-cpp-flags CppFlagsTests.cpp)
+target_link_libraries(topo-e2e-cpp-flags PRIVATE E2eHarnessLlvm)
+add_dependencies(topo-e2e-cpp-flags topo-build-llvm-cpp)
+target_compile_definitions(topo-e2e-cpp-flags PRIVATE
+    TOPO_E2E_CPP_FLAGS_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/cpp_flags")
+
 # --- topo-bench-artifacts (real pre-build) ---
 #
 # Register every benchmark project under topo-llvm/benchmarks/ for
@@ -240,6 +253,16 @@ gtest_discover_tests(topo-e2e-tsan DISCOVERY_TIMEOUT 30
         LABELS "e2e"
         RESOURCE_LOCK "topo_e2e_build"
         TIMEOUT 300
+)
+
+# [build.cpp].flags passthrough — each case builds a one-TU fixture in a
+# private temp copy, so no per-project or global lock is needed. Single
+# "e2e" label (see the LABELS mis-parse note above) puts it in the
+# benchmark+e2e job's `ctest -L e2e --label-exclude "perf|benchmark"` gate.
+gtest_discover_tests(topo-e2e-cpp-flags DISCOVERY_TIMEOUT 30
+    PROPERTIES
+        LABELS "e2e"
+        TIMEOUT 180
 )
 
 # --- per-case benchmark discovery ---

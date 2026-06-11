@@ -1,0 +1,22 @@
+# cpp_flags — plain-cpp [build.cpp].flags passthrough fixture.
+#
+# src/main.cpp #errors unless TOPO_E2E_FLAGS_PROOF is defined, so this project
+# only builds when the flags array below reaches the compile-to-IR step; the
+# e2e test (CppFlagsTests.cpp) additionally asserts the token appears on the
+# logged link command (--verbose). check = "off" keeps the fixture independent
+# of the checker — this lane proves flag transport, nothing else.
+
+[project]
+name = "cpp_flags"
+
+[topo]
+root = "topo/main.topo"
+
+[build]
+sources = ["src/*.cpp"]
+standard = "c++17"
+output = "flags_probe"
+check = "off"
+
+[build.cpp]
+flags = ["-DTOPO_E2E_FLAGS_PROOF"]

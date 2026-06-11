@@ -22,13 +22,12 @@
 // from the parallel transform trusting the wrong declaration, not from the
 // fixture itself.
 //
-// TSan is injected into BOTH the compile-to-IR and the link clang invocations
-// via CCC_OVERRIDE_OPTIONS (a clang-driver knob honoured by every clang call in
-// the build), because a plain-cpp Topo.toml has no clang-flags passthrough:
-// the [build.cpp] flags array is parsed only for [build].language = "mixed"
-// (topo-cli Config.cpp), so a flags entry on this cpp project would be silently
-// dropped at both steps. -g is already supplied by the driver's default dev
-// build mode, so the report carries source locations.
+// TSan comes from the fixture's own [build.cpp].flags = ["-fsanitize=thread"]
+// (both toml variants), which the build applies at BOTH the compile-to-IR and
+// the link clang invocations — TSan needs it at both, and this suite doubles
+// as a real-workload proof of that passthrough (CppFlagsTests.cpp carries the
+// dedicated cross-platform one). -g is already supplied by the driver's
+// default dev build mode, so the report carries source locations.
 //
 // Linux + macOS only: clang ships no ThreadSanitizer runtime for the
 // Windows/MinGW target, so -fsanitize=thread would fail to compile/link there.
@@ -81,11 +80,12 @@ protected:
     }
 
 #ifndef _WIN32
-    // Build the fixture copy at `workDir` with topo-build, injecting
-    // -fsanitize=thread into every clang invocation. `tomlVariant` (when
-    // non-empty) is copied over Topo.toml before the build (the serial leg uses
-    // "Topo-base.toml"). Returns the merged stdout+stderr build log; `outBin`
-    // and `outIR` receive the produced binary + dumped-IR paths.
+    // Build the fixture copy at `workDir` with topo-build. -fsanitize=thread
+    // comes from the fixture tomls' own [build.cpp].flags, reaching every
+    // clang invocation. `tomlVariant` (when non-empty) is copied over
+    // Topo.toml before the build (the serial leg uses "Topo-base.toml").
+    // Returns the merged stdout+stderr build log; `outBin` and `outIR`
+    // receive the produced binary + dumped-IR paths.
     RunResult buildWithTsan(const fs::path& workDir, const std::string& tomlVariant,
                             const std::string& outputName, fs::path& outBin, fs::path& outIR) {
         if (!tomlVariant.empty()) {
@@ -96,26 +96,12 @@ protected:
             fs::remove_all(workDir / ".topo-cache", ec);
         }
 
-        // CCC_OVERRIDE_OPTIONS edits every clang command line the build spawns.
-        // Leading '#' silences clang's "### …" override notice; '+' appends the
-        // flag — so the compile-to-IR step AND the link step both get
-        // -fsanitize=thread (TSan needs it at both).
-        const char* savedCcc = std::getenv("CCC_OVERRIDE_OPTIONS");
-        std::string savedCccStr = savedCcc ? savedCcc : "";
-        setenv("CCC_OVERRIDE_OPTIONS", "# +-fsanitize=thread", 1);
-
         // --dump-ir → <output>.ll (parallelization witness). --no-check is the
         // explicit opt-out this backstop exists for; Topo.toml also sets
         // check = "off", so the declaration enters the build UNVERIFIED.
         auto r = platform::runProcessCapture(topoBuildExe_.generic_string(),
                                              {"--dump-ir", "--no-check"},
                                              workDir.generic_string());
-
-        if (savedCcc) {
-            setenv("CCC_OVERRIDE_OPTIONS", savedCccStr.c_str(), 1);
-        } else {
-            unsetenv("CCC_OVERRIDE_OPTIONS");
-        }
 
         outBin = workDir / (outputName + std::string(platform::ExeSuffix));
         outIR = workDir / (outputName + ".ll");
