@@ -333,9 +333,15 @@ void Verifier::checkSignatures(const SymbolMapping& mapping, VerifyResult& resul
             ++skipCount;
         }
 
-        // Check for 'this' pointer in member functions
+        // Check for 'this' pointer in member functions. The implicit
+        // this/self slot exists only when the first IR parameter is a
+        // pointer (C++ this*, rust &self/&mut self); an associated
+        // function without self (e.g. rust `fn new(x: i32) -> Self`)
+        // has no such slot, so skipping its first real parameter would
+        // undercount and spuriously mismatch the declared arity.
         unsigned thisIdx = hasSretParam ? 1 : 0;
-        if (actualArgs > thisIdx) {
+        if (actualArgs > thisIdx && func->arg_size() > thisIdx &&
+            func->getArg(thisIdx)->getType()->isPointerTy()) {
             // If this is a known class member function, account for 'this'
             std::string nsPrefix;
             auto lastSep = name.rfind("::");
