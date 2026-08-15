@@ -11,6 +11,52 @@
 
 namespace topo {
 
+namespace {
+
+// Rust v0 mangles impl methods with an impl path, which llvm::demangle
+// renders wrapped in angle brackets:
+//   inherent impl:  "<crate::Type>::method"           (e.g. "<cart::Cart>::new")
+//   trait impl:     "<crate::Type as crate::Trait>::method"
+//   generic self:   "<crate::Bag<i32>>::get"
+// `.topo` declares these as "ns::Type::method", so the raw demangled form
+// can never collide with the declared key. Return angle-bracket-free
+// candidate keys — the full "crate::Type::method" path and the bare
+// "Type::method" path — which are registered alongside the raw name so both
+// the direct lookup and the "::qualifiedName" suffix fallback can resolve.
+//
+// Only rust v0 produces "<...>"-leading demangles (Itanium and MSVC render
+// types as path segments without an angle wrapper), so this derivation is
+// rust-specific by construction. Trait-impl renderings keep the SELF type —
+// the method is declared on the type, not on the trait — and ` as ` is
+// always top-level in impl paths (generic arguments are types, which never
+// contain it).
+std::vector<std::string> rustImplCandidates(const std::string& qualified) {
+    if (qualified.size() < 4 || qualified.front() != '<') return {};
+
+    // Split "<...>::method" at the LAST ">::" — a generic self type closes
+    // with ">>::", and rfind lands on the '>' directly before the method.
+    auto split = qualified.rfind(">::");
+    if (split == std::string::npos) return {};
+
+    std::string self = qualified.substr(1, split - 1);
+    std::string method = qualified.substr(split + 3);
+    if (self.empty() || method.empty()) return {};
+
+    auto asPos = self.find(" as ");
+    if (asPos != std::string::npos) self = self.substr(0, asPos);
+    if (self.empty()) return {};
+
+    std::vector<std::string> keys;
+    keys.push_back(self + "::" + method);
+    auto lastSep = self.rfind("::");
+    if (lastSep != std::string::npos) {
+        keys.push_back(self.substr(lastSep + 2) + "::" + method);
+    }
+    return keys;
+}
+
+} // namespace
+
 SymbolMapper::SymbolMapper(llvm::LLVMContext& ctx) : ctx_(ctx) {}
 
 std::unique_ptr<llvm::Module> SymbolMapper::loadModule(const std::string& path) {
@@ -173,8 +219,13 @@ SymbolMapping SymbolMapper::mapSymbols(llvm::Module& module, const std::vector<V
         topoNames.insert(entry.qualifiedName);
     }
 
-    // Build demangled name → Function map
+    // Build demangled name → Function map. Rust v0 impl methods demangle as
+    // "<crate::Type>::method"; the angle-bracket-free candidate keys
+    // (rustImplCandidates) are registered next to the raw demangled name so
+    // ".topo" "ns::Type::method" declarations can resolve to them. The raw
+    // name stays the primary key — it is what unmatched-IR reporting shows.
     std::unordered_map<std::string, llvm::Function*> demangledMap;
+    std::unordered_map<const llvm::Function*, std::string> primaryKey;
     for (auto& func : module) {
         if (shouldSkip(func)) continue;
 
@@ -185,10 +236,16 @@ SymbolMapping SymbolMapper::mapSymbols(llvm::Module& module, const std::vector<V
             qualified = func.getName().str();
         }
         demangledMap[qualified] = &func;
+        primaryKey[&func] = qualified;
+        for (const auto& candidate : rustImplCandidates(qualified)) {
+            // emplace: a candidate never displaces a primary key or an
+            // earlier candidate — the most-qualified spelling wins ties.
+            demangledMap.emplace(candidate, &func);
+        }
     }
 
     // Match Topo entries to LLVM functions
-    std::unordered_set<std::string> matchedIR;
+    std::unordered_set<const llvm::Function*> matchedFuncs;
 
     // Priority pass: match entries that have explicit bindingTarget
     for (const auto& entry : entries) {
@@ -196,7 +253,7 @@ SymbolMapping SymbolMapper::mapSymbols(llvm::Module& module, const std::vector<V
         auto it = demangledMap.find(*entry.bindingTarget);
         if (it != demangledMap.end()) {
             result.matched[entry.qualifiedName] = it->second;
-            matchedIR.insert(*entry.bindingTarget);
+            matchedFuncs.insert(it->second);
         }
         // If not found, target may be in an external library — resolved at link time
     }
@@ -208,7 +265,7 @@ SymbolMapping SymbolMapper::mapSymbols(llvm::Module& module, const std::vector<V
         auto it = demangledMap.find(entry.qualifiedName);
         if (it != demangledMap.end()) {
             result.matched[entry.qualifiedName] = it->second;
-            matchedIR.insert(entry.qualifiedName);
+            matchedFuncs.insert(it->second);
             continue;
         }
 
@@ -231,7 +288,7 @@ SymbolMapping SymbolMapper::mapSymbols(llvm::Module& module, const std::vector<V
         }
         if (bestFunc) {
             result.matched[entry.qualifiedName] = bestFunc;
-            matchedIR.insert(bestIRName);
+            matchedFuncs.insert(bestFunc);
             found = true;
         }
         if (found) continue;
@@ -244,7 +301,7 @@ SymbolMapping SymbolMapper::mapSymbols(llvm::Module& module, const std::vector<V
             auto it2 = demangledMap.find(simpleName);
             if (it2 != demangledMap.end()) {
                 result.matched[entry.qualifiedName] = it2->second;
-                matchedIR.insert(simpleName);
+                matchedFuncs.insert(it2->second);
                 continue;
             }
         }
@@ -252,11 +309,21 @@ SymbolMapping SymbolMapper::mapSymbols(llvm::Module& module, const std::vector<V
         result.unmatchedTopo.push_back(entry.qualifiedName);
     }
 
-    // Find IR functions not matched by any Topo entry
-    for (const auto& [name, func] : demangledMap) {
-        if (matchedIR.find(name) == matchedIR.end()) {
-            result.unmatchedIR.push_back(name);
-        }
+    // Find IR functions not matched by any Topo entry. Function-pointer
+    // tracking (not name tracking) keeps the candidate keys out of this
+    // report — a function matched through a candidate is not "unmatched".
+    // Report only the function registered under its demangled key: when two
+    // functions share one demangled key (e.g. C++ overloads), the map holds
+    // the last one and the earlier one stays invisible, mirroring the
+    // pre-candidate behaviour of one report per key.
+    for (auto& func : module) {
+        if (shouldSkip(func)) continue;
+        if (matchedFuncs.count(&func)) continue;
+        auto pk = primaryKey.find(&func);
+        if (pk == primaryKey.end()) continue;
+        auto rep = demangledMap.find(pk->second);
+        if (rep == demangledMap.end() || rep->second != &func) continue;
+        result.unmatchedIR.push_back(pk->second);
     }
 
     return result;
@@ -272,6 +339,11 @@ std::unordered_map<std::string, llvm::Function*> SymbolMapper::buildDemangledMap
             qualified = func.getName().str();
         }
         result[qualified] = &func;
+        for (const auto& candidate : rustImplCandidates(qualified)) {
+            // Same emplace convention as mapSymbols — candidates never
+            // displace a primary key or an earlier candidate.
+            result.emplace(candidate, &func);
+        }
     }
     return result;
 }

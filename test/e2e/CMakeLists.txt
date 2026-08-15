@@ -265,6 +265,25 @@ gtest_discover_tests(topo-e2e-cpp-flags DISCOVERY_TIMEOUT 30
         TIMEOUT 180
 )
 
+# Rust impl-method IR verification — the rust_impl_methods fixture declares
+# and implements struct methods; the case pins that topo-build's Step-5
+# symbol mapping folds rust v0's "<crate::Type>::method" impl wrapper onto the
+# ".topo" "ns::Type::method" keys. Builds a one-crate fixture in a private
+# temp copy (cargo target/ + topo build state), so no per-project or global
+# lock is needed. Single "e2e" label (see the LABELS mis-parse note above)
+# puts it in the benchmark+e2e job's `ctest -L e2e --label-exclude
+# "perf|benchmark"` gate.
+add_executable(topo-e2e-rust-impl RustImplMethodTests.cpp)
+target_link_libraries(topo-e2e-rust-impl PRIVATE E2eHarnessLlvm)
+add_dependencies(topo-e2e-rust-impl topo-build-llvm-rust)
+target_compile_definitions(topo-e2e-rust-impl PRIVATE
+    TOPO_E2E_RUST_IMPL_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/rust_impl_methods")
+gtest_discover_tests(topo-e2e-rust-impl DISCOVERY_TIMEOUT 30
+    PROPERTIES
+        LABELS "e2e"
+        TIMEOUT 300
+)
+
 # --- per-case benchmark discovery ---
 #
 # Each CATEGORY_BENCH_TEST_F expands to a gtest class named
