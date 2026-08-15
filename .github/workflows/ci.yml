@@ -139,7 +139,10 @@ jobs:
           # v7: topo-core BuildConfig gained cppFlags + topo-lang-cpp's
           # CppDriver consumes it; the backend tools' main.cpp references the
           # new field, so a stale cached install header no longer compiles.
-          key: topo-upstream-${{ env.TOPO_CORE_REF }}-${{ env.TOPO_LANG_REF }}-${{ env.TOPO_LANG_CPP_REF }}-${{ matrix.os }}-v7-crt
+          # v8: the dev-pinned upstream tips advanced (fix batch merged to
+          # core/cpp/cli dev); the key interpolates the refs, not their
+          # content — force the fresh clone.
+          key: topo-upstream-${{ env.TOPO_CORE_REF }}-${{ env.TOPO_LANG_REF }}-${{ env.TOPO_LANG_CPP_REF }}-${{ matrix.os }}-v8-crt
 
       - name: Build & install topo-core (zero-LLVM, lang-less)
         if: steps.upstream-cache.outputs.cache-hit != 'true'
