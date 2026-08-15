@@ -9,7 +9,7 @@ namespace lifetime_rust {
 
     fn run_test {
       allocate -> process;
-      process -> i32;
+      process -> void;
     }
 
     lifetime batch = allocate..process;

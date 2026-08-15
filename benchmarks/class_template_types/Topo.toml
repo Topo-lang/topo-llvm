@@ -9,3 +9,23 @@ sources = ["src/*.cpp"]
 include = ["include"]
 standard = "c++17"
 output = "class_template_types"
+
+# Benchmark scaffolding symbols are outside the .topo contract.
+[completeness]
+ignore_constructors = true
+ignore_destructors = true
+ignore_patterns = [
+    "approx",
+    "c",
+    "container::Circle",
+    "container::Circle::radius",
+    "container::MathConstants",
+    "container::MathConstants::e",
+    "container::MathConstants::pi",
+    "container::Shape",
+    "container::Shape::area",
+    "container::Shape::perimeter",
+    "container::Shape::validate",
+    "friendly_bench",
+    "unfriendly_bench",
+]

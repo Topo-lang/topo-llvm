@@ -1,0 +1,13 @@
+// cpp_flags — [build.cpp].flags passthrough fixture (plain cpp project).
+//
+// The host source refuses to compile without -DTOPO_E2E_FLAGS_PROOF
+// (#ifndef/#error), so a successful build proves the flags array reached
+// the compile-to-IR step; CppFlagsTests.cpp asserts the link side from the
+// --verbose command echo.
+
+using int = std::cpp17::int;
+
+namespace probe {
+  public:
+    int answer();
+}

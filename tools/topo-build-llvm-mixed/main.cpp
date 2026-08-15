@@ -167,6 +167,7 @@ int main(int argc, char* argv[]) {
     cppCfg.includeDirs = cppIncludeDirs;
     cppCfg.hostCompilerPath = hostCompiler.empty() ? topo::platform::llvmClangxx() : hostCompiler;
     cppCfg.standard = standard;
+    cppCfg.cppFlags = cppFlags;
     cppCfg.outputType = req.config.outputType;
     cppCfg.embedIR = req.config.embedIR;
     cppCfg.adaptiveCfg = req.config.adaptiveCfg;
@@ -365,6 +366,7 @@ int main(int argc, char* argv[]) {
     linkCfg.buildMode = req.config.buildMode;
     linkCfg.hostCompilerPath = hostCompiler.empty() ? topo::platform::llvmClangxx() : hostCompiler;
     linkCfg.standard = standard;
+    linkCfg.cppFlags = cppFlags;
     linkCfg.linkLibs = req.linkLibs;
     linkCfg.linkDirs = req.linkDirs;
     linkCfg.verbose = req.verbose;

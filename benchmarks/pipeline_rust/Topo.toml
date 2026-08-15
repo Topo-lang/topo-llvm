@@ -8,3 +8,9 @@ root = "topo/main.topo"
 language = "rust"
 sources = ["src"]
 output = "pipeline_rust"
+
+# Benchmark scaffolding symbols are outside the .topo contract.
+[completeness]
+ignore_constructors = true
+ignore_destructors = true
+ignore_patterns = ["friendly_work", "unfriendly_work"]

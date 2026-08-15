@@ -106,6 +106,19 @@ add_dependencies(topo-e2e-tsan topo-build-llvm-cpp topo-parallel topo-pass-event
 target_compile_definitions(topo-e2e-tsan PRIVATE
     TOPO_E2E_TSAN_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/tsan_race")
 
+# --- [build.cpp].flags passthrough ---
+#
+# Builds the cpp_flags fixture (a plain-cpp project whose source #errors
+# without -DTOPO_E2E_FLAGS_PROOF) and asserts the Topo.toml flags array
+# reaches both the compile-to-IR and the link clang invocation. Like
+# tsan_race, the fixture lives under THIS dir's fixtures/ so the
+# bench-artifacts glob never enumerates it.
+add_executable(topo-e2e-cpp-flags CppFlagsTests.cpp)
+target_link_libraries(topo-e2e-cpp-flags PRIVATE E2eHarnessLlvm)
+add_dependencies(topo-e2e-cpp-flags topo-build-llvm-cpp)
+target_compile_definitions(topo-e2e-cpp-flags PRIVATE
+    TOPO_E2E_CPP_FLAGS_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/cpp_flags")
+
 # --- topo-bench-artifacts (real pre-build) ---
 #
 # Register every benchmark project under topo-llvm/benchmarks/ for
@@ -128,6 +141,29 @@ target_compile_definitions(topo-e2e-tsan PRIVATE
 # `add_custom_command(OUTPUT …)` rules declared in a subdirectory scope aren't
 # visible to the aggregate target declared in a sibling scope, so the topo-llvm
 # registrations live in the root scope alongside topo-jvm's.
+
+# --- CTest fixture provider for `topo_bench_artifacts` (standalone) ---
+# CTest treats a fixture with no FIXTURES_SETUP test as legal and SILENTLY
+# runs FIXTURES_REQUIRED tests without it (the harness then falls back to
+# slow inline per-case builds). Meta-only contract: in the meta union,
+# topo-jvm/test/e2e/CMakeLists.txt registers the single shared provider
+# (configured before this file — meta adds topo-jvm before
+# topo-llvm/tools-late), so this block is skipped there via
+# TOPO_META_DRIVING_TESTS to keep exactly one provider. Standalone
+# topo-llvm self-provides: benchmarks/ (configured just before this dir in
+# both layouts) already created the `topo-bench-artifacts` aggregate.
+# Caveat: a partial meta (TOPO_META_ALLOW_PARTIAL=ON, no topo-jvm clone)
+# with LLVM benchmarks ON would again lack a provider — local-only, exotic.
+if(NOT TOPO_META_DRIVING_TESTS)
+    add_test(NAME topo_bench_artifacts_build
+        COMMAND ${CMAKE_COMMAND}
+                --build ${CMAKE_BINARY_DIR}
+                --target topo-bench-artifacts)
+    set_tests_properties(topo_bench_artifacts_build PROPERTIES
+        FIXTURES_SETUP "topo_bench_artifacts"
+        TIMEOUT 3600
+        LABELS "bench_fixture")
+endif()
 
 # --- B5: Decompile Round-trip ---
 add_executable(topo-e2e-decompile DecompileTests.cpp)
@@ -219,6 +255,35 @@ gtest_discover_tests(topo-e2e-tsan DISCOVERY_TIMEOUT 30
         TIMEOUT 300
 )
 
+# [build.cpp].flags passthrough — each case builds a one-TU fixture in a
+# private temp copy, so no per-project or global lock is needed. Single
+# "e2e" label (see the LABELS mis-parse note above) puts it in the
+# benchmark+e2e job's `ctest -L e2e --label-exclude "perf|benchmark"` gate.
+gtest_discover_tests(topo-e2e-cpp-flags DISCOVERY_TIMEOUT 30
+    PROPERTIES
+        LABELS "e2e"
+        TIMEOUT 180
+)
+
+# Rust impl-method IR verification — the rust_impl_methods fixture declares
+# and implements struct methods; the case pins that topo-build's Step-5
+# symbol mapping folds rust v0's "<crate::Type>::method" impl wrapper onto the
+# ".topo" "ns::Type::method" keys. Builds a one-crate fixture in a private
+# temp copy (cargo target/ + topo build state), so no per-project or global
+# lock is needed. Single "e2e" label (see the LABELS mis-parse note above)
+# puts it in the benchmark+e2e job's `ctest -L e2e --label-exclude
+# "perf|benchmark"` gate.
+add_executable(topo-e2e-rust-impl RustImplMethodTests.cpp)
+target_link_libraries(topo-e2e-rust-impl PRIVATE E2eHarnessLlvm)
+add_dependencies(topo-e2e-rust-impl topo-build-llvm-rust)
+target_compile_definitions(topo-e2e-rust-impl PRIVATE
+    TOPO_E2E_RUST_IMPL_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/rust_impl_methods")
+gtest_discover_tests(topo-e2e-rust-impl DISCOVERY_TIMEOUT 30
+    PROPERTIES
+        LABELS "e2e"
+        TIMEOUT 300
+)
+
 # --- per-case benchmark discovery ---
 #
 # Each CATEGORY_BENCH_TEST_F expands to a gtest class named
@@ -231,9 +296,11 @@ gtest_discover_tests(topo-e2e-tsan DISCOVERY_TIMEOUT 30
 # existing `scripts/test.sh perf` filtering continues to work unchanged.
 #
 # Split-responsibility locking:
-#   - Pre-build: CMake-level cross-project parallelism via `topo_bench_artifacts`
-#     setup fixture (defined in the JVM CMakeLists because both LLVM and JVM
-#     share the fixture name). Keeps fc96660's 22min → 460s artifact-build win.
+#   - Pre-build: CMake-level cross-project parallelism via the
+#     `topo_bench_artifacts` setup fixture. Provider split: standalone
+#     registers the in-repo provider above (bench-artifacts section); in the
+#     meta union topo-jvm/test/e2e registers the single shared provider and
+#     the in-repo one is skipped via TOPO_META_DRIVING_TESTS.
 #   - Measurement: CTest-level serialisation via `topo_bench_measure` lock.
 #     Benchmarks time CPU-bound subprocess runs; `ctest -j N` without a
 #     measurement lock lets concurrent bench binaries contend for cores and

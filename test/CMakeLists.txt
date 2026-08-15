@@ -27,6 +27,7 @@ add_executable(topo-llvm-unit-tests
     unit/ObservabilityPassTest.cpp
     unit/LLVMTransformBackendTest.cpp
     unit/SymbolMappingRebindTest.cpp
+    unit/SymbolMapperRustTest.cpp
     unit/TopoProfHintsTest.cpp
     unit/PrefetchPassTest.cpp
     unit/LLVMLifterL2Test.cpp

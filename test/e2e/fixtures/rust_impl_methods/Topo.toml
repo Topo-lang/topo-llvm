@@ -1,0 +1,23 @@
+# rust_impl_methods — rust struct with declared+implemented methods.
+#
+# Regression fixture for impl-method symbol mapping: rustc v0-mangles the
+# methods as _RNvMC... symbols that demangle to
+# "<rust_impl_methods::Cart>::new" / "<rust_impl_methods::Cart>::total", and
+# the SymbolMapper must fold the angle-bracket impl wrapper back onto the
+# "rust_impl_methods::Cart::{new,total}" keys declared in topo/main.topo.
+# Before that fix this project failed topo-build IR verification with
+# "missing in LLVM IR" for both declared methods.
+
+[project]
+name = "rust_impl_methods"
+
+[topo]
+root = "topo/main.topo"
+
+[build]
+language = "rust"
+sources = ["src/**/*.rs"]
+output = "rust_impl_methods"
+
+[completeness]
+ignore_main = true

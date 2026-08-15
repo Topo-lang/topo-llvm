@@ -14,3 +14,16 @@ output = "observability"
 mode = "auto"
 exporter = "stdout"
 sampling_rate = 1.0
+
+# Benchmark scaffolding and toolchain runtime symbols (topo::*/topo_*/__topo_*)
+# are outside the .topo contract.
+[completeness]
+ignore_constructors = true
+ignore_destructors = true
+ignore_patterns = [
+    "topo::*",
+    "topo_*",
+    "__topo_*",
+    "benchmark",
+    "flat_execute",
+]

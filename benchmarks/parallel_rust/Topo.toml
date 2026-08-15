@@ -11,3 +11,18 @@ output = "parallel_rust"
 
 [parallel]
 mode = "force"
+
+# Benchmark scaffolding and toolchain runtime symbols (topo::*/topo_*/__topo_*)
+# are outside the .topo contract.
+[completeness]
+ignore_constructors = true
+ignore_destructors = true
+ignore_patterns = [
+    "topo::*",
+    "topo_*",
+    "__topo_*",
+    "friendly_work",
+    "heavy_work",
+    "light_work",
+    "unfriendly_work",
+]

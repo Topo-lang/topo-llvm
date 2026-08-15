@@ -9,3 +9,28 @@ sources = ["src/*.cpp"]
 include = ["include"]
 standard = "c++17"
 output = "class_template_crtp"
+
+# Benchmark scaffolding symbols are outside the .topo contract.
+[completeness]
+ignore_constructors = true
+ignore_destructors = true
+ignore_patterns = [
+    "c",
+    "collection::Counter",
+    "collection::Counter::bump",
+    "collection::Counter::print_impl",
+    "collection::Counter::score_impl",
+    "collection::Counter::value",
+    "collection::Point",
+    "collection::Point::print_impl",
+    "collection::Point::score_impl",
+    "collection::Point::x",
+    "collection::Point::y",
+    "collection::Printable",
+    "collection::Printable::print",
+    "collection::Printable::println",
+    "collection::Printable::score",
+    "friendly_bench",
+    "pt",
+    "unfriendly_bench",
+]

@@ -39,7 +39,11 @@ public:
     SymbolMapping mapSymbols(llvm::Module& module, const std::vector<VisibilityEntry>& entries);
 
     // Build a map of demangled qualified names → Function* for all non-skipped
-    // functions in the module. Used by Verifier for template matching.
+    // functions in the module. Rust v0 impl methods ("<crate::Type>::method")
+    // additionally register angle-bracket-free candidate keys
+    // ("crate::Type::method", "Type::method") so "ns::Type::method"
+    // declarations resolve. Used by Verifier for template matching and the
+    // decompile lifter for metadata name resolution.
     static std::unordered_map<std::string, llvm::Function*> buildDemangledMap(llvm::Module& module);
 
 private:

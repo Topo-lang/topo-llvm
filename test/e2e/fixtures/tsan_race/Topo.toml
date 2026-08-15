@@ -5,15 +5,11 @@
 # parallel-safe. TopoParallelPass trusts the declaration and spawns the racy
 # work concurrently with no static diagnostic anywhere.
 #
-# ThreadSanitizer is NOT requested here via a [build.cpp] flags array: that
-# clang-flags passthrough is parsed only for [build].language = "mixed"
-# (topo-cli Config.cpp), so for a plain cpp project a flags array would be
-# silently ignored and reach neither the compile nor the link step. The e2e
-# test (TsanBackstopTests.cpp) instead injects -fsanitize=thread into every
-# clang invocation — both the compile-to-IR and the link — via the
-# CCC_OVERRIDE_OPTIONS env var, which covers compile and link with one knob.
-# -g is already supplied by the driver's default dev build mode, so the TSan
-# report carries source locations.
+# ThreadSanitizer is requested via the [build.cpp].flags passthrough below,
+# which reaches BOTH the compile-to-IR and the link clang invocations of a
+# plain-cpp build (TSan needs it at both; the cpp_flags e2e lane proves that
+# transport). -g is already supplied by the driver's default dev build mode,
+# so the TSan report carries source locations.
 
 [project]
 name = "tsan_race"
@@ -26,6 +22,9 @@ sources = ["src/*.cpp"]
 standard = "c++17"
 output = "tsan_race"
 check = "off"
+
+[build.cpp]
+flags = ["-fsanitize=thread"]
 
 [parallel]
 mode = "force"

@@ -1,0 +1,19 @@
+// rust_impl_methods — struct with declared+implemented methods.
+//
+// Pairs with src/lib.rs: rustc v0-mangles `impl Cart { ... }` methods with
+// an impl path that demangles as "<rust_impl_methods::Cart>::new", while the
+// declarations below produce the "rust_impl_methods::Cart::{new,total,add}"
+// member keys. The SymbolMapper must map the ns::Type::method form onto the
+// angle-bracketed IR form during topo-build verification.
+
+using i32 = std::rust::i32;
+
+namespace rust_impl_methods {
+  public:
+    type Cart {
+      public:
+        Cart new();
+        i32 total() const;
+        i32 add(i32 other) const;
+    }
+}

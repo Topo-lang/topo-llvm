@@ -9,3 +9,14 @@ sources = ["src/*.cpp"]
 include = ["include"]
 standard = "c++17"
 output = "stages"
+
+# Benchmark scaffolding symbols are outside the .topo contract.
+[completeness]
+ignore_constructors = true
+ignore_destructors = true
+ignore_patterns = [
+    "app::get_init_log",
+    "benchmark",
+    "friendly_work",
+    "unfriendly_work",
+]

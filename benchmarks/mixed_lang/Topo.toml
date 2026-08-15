@@ -7,6 +7,9 @@ root = "topo/main.topo"
 [build]
 language = "mixed"
 output = "mixed_lang"
+# No checker is registered for mixed C++/Rust (topo-check exits "no language
+# plugin"); topo-build auto-skips the check phase under "auto" already.
+check = "off"
 
 [build.cpp]
 sources = ["src/*.cpp"]

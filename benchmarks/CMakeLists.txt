@@ -43,3 +43,23 @@ topo_register_all_bench_artifacts(
         visibility_rust)
 
 topo_finalize_bench_artifacts_target()
+
+# Check-clean guard: every benchmark project's Topo.toml + .topo + host
+# sources must pass topo-check as committed. Projects that opt out must say
+# so explicitly via `check = "off"` in [build] (only mixed_lang today — no
+# checker is registered for mixed); the skip below keys on that marker, so
+# an opt-out is always visible in the project's own Topo.toml. Single label
+# only — multi-label LABELS strings mis-parse (see test/e2e LABELS note).
+file(GLOB _topo_bench_tomls "${CMAKE_CURRENT_SOURCE_DIR}/*/Topo.toml")
+foreach(_toml IN LISTS _topo_bench_tomls)
+    file(READ "${_toml}" _toml_content)
+    if(_toml_content MATCHES "check *= *\"off\"")
+        continue()
+    endif()
+    get_filename_component(_proj_dir "${_toml}" DIRECTORY)
+    get_filename_component(_proj "${_proj_dir}" NAME)
+    add_test(NAME e2e.check_clean.${_proj}
+        COMMAND $<TARGET_FILE:topo::cli::topo-check> --project "${_proj_dir}")
+    set_tests_properties(e2e.check_clean.${_proj} PROPERTIES LABELS "e2e")
+endforeach()
+unset(_toml_content)

@@ -9,3 +9,16 @@ sources = ["src/*.cpp"]
 include = ["include"]
 standard = "c++17"
 output = "class_template_variadic"
+
+# Benchmark scaffolding symbols are outside the .topo contract.
+[completeness]
+ignore_constructors = true
+ignore_destructors = true
+ignore_patterns = [
+    "friendly_bench",
+    "unfriendly_bench",
+    "variadic::Tuple",
+    "variadic::Tuple::component_count",
+    "variadic::print_all",
+    "variadic::sum_ints",
+]

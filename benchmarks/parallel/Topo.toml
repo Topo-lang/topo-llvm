@@ -12,3 +12,19 @@ output = "parallel_runtime"
 
 [parallel]
 mode = "auto"
+
+# Benchmark scaffolding and toolchain runtime symbols (topo::*/topo_*/__topo_*)
+# are outside the .topo contract.
+[completeness]
+ignore_constructors = true
+ignore_destructors = true
+ignore_patterns = [
+    "topo::*",
+    "topo_*",
+    "__topo_*",
+    "benchmark",
+    "friendly_work",
+    "heavy_work",
+    "light_work",
+    "unfriendly_work",
+]

@@ -20,3 +20,17 @@ mode = "soa"
 [optimize.prefetch]
 mode = "auto"
 distance = 64
+
+# Benchmark scaffolding and toolchain runtime symbols (topo::*/topo_*/__topo_*)
+# are outside the .topo contract.
+[completeness]
+ignore_constructors = true
+ignore_destructors = true
+ignore_patterns = [
+    "topo::*",
+    "topo_*",
+    "__topo_*",
+    "benchmark",
+    "friendly_work",
+    "unfriendly_work",
+]

@@ -27,6 +27,18 @@ void overwriteCopy(const fs::path& from, const fs::path& to) {
     fs::remove(to, rmEc); // ignore "does not exist"
     fs::copy_file(from, to);
 }
+
+// A fixture with no FIXTURES_SETUP test is legal CTest: the suite then
+// silently degrades to slow inline per-case builds with no other symptom.
+// One stderr line per miss keeps that configuration visible in ctest logs
+// while leaving ad-hoc (non-ctest) runs functional.
+void warnMissingPrebuilt(const std::string& projectName,
+                         const std::string& expectedOutput) {
+    std::cerr << "[e2e] prebuilt artefact missing for " << projectName << "/"
+              << expectedOutput
+              << " — inline-build fallback; is the topo_bench_artifacts "
+                 "fixture provider registered?\n";
+}
 } // namespace
 
 // ============================================================================
@@ -124,6 +136,7 @@ RunResult E2eFixture::topoBuild(const std::string& projectName,
         if (fs::exists(bin)) {
             return RunResult{0, "[prebuilt] " + bin.generic_string()};
         }
+        warnMissingPrebuilt(projectName, expectedOutput);
     }
 
     // Always --dump-ir: produces <output>.ll alongside the binary, which the
@@ -166,6 +179,7 @@ RunResult E2eFixture::topoBaseBuild(const std::string& projectName,
         if (fs::exists(bin)) {
             return RunResult{0, "[prebuilt] " + bin.generic_string()};
         }
+        warnMissingPrebuilt(projectName, expectedOutput);
     }
 
     fs::path topoToml = projDir / "Topo.toml";
@@ -209,6 +223,7 @@ RunResult E2eFixture::topoForcedBuild(const std::string& projectName,
         if (fs::exists(bin)) {
             return RunResult{0, "[prebuilt] " + bin.generic_string()};
         }
+        warnMissingPrebuilt(projectName, expectedOutput);
     }
 
     fs::path topoToml = projDir / "Topo.toml";
