@@ -51,8 +51,10 @@ protected:
         ASSERT_FALSE(src.empty()) << "TOPO_E2E_RUST_IMPL_FIXTURE_DIR not defined";
         ASSERT_TRUE(fs::exists(src)) << "rust_impl_methods fixture not found: " << src;
         workDir_ = fs::temp_directory_path() / "topo_e2e_rust_impl_methods";
-        copyFixtureTree(src, workDir_);
-        projectsDir_ = workDir_.parent_path();
+        // topoBuild() joins projectsDir_/<projectName>, so the fixture copy
+        // must land at <workDir_>/rust_impl_methods — not at workDir_ itself.
+        copyFixtureTree(src, workDir_ / "rust_impl_methods");
+        projectsDir_ = workDir_;
     }
 
     void TearDown() override {
