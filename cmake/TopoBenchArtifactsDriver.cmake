@@ -248,12 +248,25 @@ function(_topo_run_build label workdir)
         # visible. Written to a .ps1 to avoid cmake→powershell argv quoting.
         if(WIN32)
             file(WRITE "${_scratch_dir}/_topo_diag.ps1"
-"Set-Location -LiteralPath '${workdir}'
-& '${TOPO_BUILD_EXE}' --dump-ir --no-check
-Write-Host \"ps-spawn-rc=\$LASTEXITCODE\"
-Write-Host \"exe dir contents:\"
-Get-ChildItem (Split-Path '${TOPO_BUILD_EXE}') | Select-Object -ExpandProperty Name
-Write-Host \"PATH=\$env:PATH\"")
+"Write-Host \"--- import table of topo-build ---\"
+\$obj = & objdump -p '${TOPO_BUILD_EXE}' 2>\$null | Select-String 'DLL Name'
+\$obj | ForEach-Object { Write-Host \$_ }
+Write-Host \"--- existence walk (exe dir, system32, CWD, PATH dirs) ---\"
+\$names = @()
+if (\$obj) { \$names = \$obj | ForEach-Object { \$_.Line.Trim() -replace '^DLL Name: ',''} }
+\$dirs = @((Split-Path '${TOPO_BUILD_EXE}'), \"\$env:WINDIR\\System32\", (Get-Location).Path) + (\$env:PATH -split ';')
+foreach (\$n in \$names) {
+    \$found = \$dirs | Where-Object { Test-Path (Join-Path \$_ \$n) } | Select-Object -First 1
+    Write-Host (\"DLL {0} -> {1}\" -f \$n, \$(\$found))
+}
+Write-Host \"--- spawn from scratch (cwd='${workdir}') ---\"
+Set-Location -LiteralPath '${workdir}'
+& '${TOPO_BUILD_EXE}' --help
+Write-Host \"scratch-spawn-rc=\$LASTEXITCODE\"
+Write-Host \"--- spawn from real project dir (cwd='${PROJECT_DIR}') ---\"
+Set-Location -LiteralPath '${PROJECT_DIR}'
+& '${TOPO_BUILD_EXE}' --help
+Write-Host \"projectdir-spawn-rc=\$LASTEXITCODE\"")
             execute_process(
                 COMMAND powershell -NoProfile -ExecutionPolicy Bypass
                     -File "${_scratch_dir}/_topo_diag.ps1"
