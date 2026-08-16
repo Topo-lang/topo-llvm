@@ -17,15 +17,39 @@
 # Runs all benchmark variants for ONE project sequentially:
 #   1. (C++ only, optional) vanilla  — clang++ -O2 -o build/baseline
 #   2. (JVM only, optional) vanilla  — javac + jar -> build/vanilla.jar
-#   3. topo base   — swap Topo-base.toml   -> Topo.toml, run topo-build, restore
-#   4. topo auto   — run topo-build on Topo.toml as-is
-#   5. topo forced — swap Topo-forced.toml -> Topo.toml, run topo-build, restore
+#   3. topo base   — scratch copy: Topo-base.toml -> scratch Topo.toml,
+#                    run topo-build in the scratch dir, copy outputs back
+#   4. topo auto   — scratch copy of Topo.toml as-is, build, copy outputs back
+#   5. topo forced — scratch copy: Topo-forced.toml -> scratch Topo.toml,
+#                    build, copy outputs back
+#
+# The three topo variants run on a PRIVATE scratch copy of the project
+# (under <STAMP_FILE>-scratch, i.e. inside the build tree) instead of
+# swapping the committed Topo.toml in place. The real benchmark tree is
+# only ever read (and receives the built artefacts back); its Topo.toml is
+# never written. This removes the build-side writer from the in-place
+# Topo.toml swap race that dirtied benchmark trees and flaked the
+# e2e.check_clean guards under a parallel `ctest -j N` (issue
+# e2e-inplace-toml-swap-race-dirties-tree — decision: ctest-side writers
+# are serialised with per-project RESOURCE_LOCKs, the build-side writer
+# moved to scratch copies; see the fix-batch planning doc).
+#
+# Include rewriting: benchmark Topo.tomls carry depth-sensitive relative
+# includes ("../../../topo-lang-cpp/runtime/include", "../../runtime/
+# include"). The scratch copy lives under the build dir, so those would
+# resolve differently; every [build].include entry is therefore rewritten
+# to an absolute path anchored at the REAL project dir before the build.
+# topo-build passes absolute include dirs through unchanged
+# (topo-cli Config.cpp: baseDir / <abs> == <abs>).
 #
 # All builds are mandatory except vanilla (which some projects skip because
 # their sources use topo runtime headers that plain clang can't compile).
 # On success the stamp file is touched. On failure the stamp is NOT touched
 # and the build fails with a clear diagnostic; CMake will re-run the driver
-# next invocation (per standard custom_command semantics).
+# next invocation (per standard custom_command semantics). An interrupted
+# run may leave the scratch dir behind; the next invocation removes it
+# wholesale at prepare time, so it is self-healing and never dirties the
+# source tree.
 #
 # Incremental semantics: CMake tracks staleness via the stamp file's mtime
 # relative to the DEPENDS list in the upstream `add_custom_command(OUTPUT ...)`.
@@ -70,28 +94,133 @@ if(DEFINED BACKEND_TOOL_DIRS AND NOT BACKEND_TOOL_DIRS STREQUAL "")
 endif()
 
 set(_topo_toml       "${PROJECT_DIR}/Topo.toml")
-set(_base_toml       "${PROJECT_DIR}/Topo-base.toml")
-set(_forced_toml     "${PROJECT_DIR}/Topo-forced.toml")
 set(_saved_toml      "${PROJECT_DIR}/Topo.toml.prebuild-saved")
-set(_cache_dir       "${PROJECT_DIR}/.topo-cache")
+set(_scratch_dir     "${STAMP_FILE}-scratch")
 
 if(NOT EXISTS "${_topo_toml}")
     message(FATAL_ERROR "TopoBenchArtifactsDriver: Topo.toml not found in ${PROJECT_DIR}")
 endif()
 
 # ---------------------------------------------------------------------------
-# Helper: run a single topo-build invocation in PROJECT_DIR.
+# Scratch-copy helpers. The scratch dir mirrors the real project's layout
+# (src/, topo/, include/, Topo*.toml) so project-relative paths in the
+# tomls keep working; only the depth-sensitive ../.. entries need the
+# include rewrite handled by _topo_rewrite_include.
+# ---------------------------------------------------------------------------
+
+# Parse the [build].include array (single line, stable shape — the same
+# assumption as _topo_vanilla_cpp's regex mirror) into a CMake list.
+function(_topo_include_list toml_path out_var)
+    file(READ "${toml_path}" _t)
+    set(_list "")
+    string(REGEX MATCH "include[ \t]*=[ \t]*\\[([^]]*)\\]" _ "${_t}")
+    if(CMAKE_MATCH_1)
+        string(REPLACE "\"" "" _sl "${CMAKE_MATCH_1}")
+        string(REPLACE "," ";" _sl "${_sl}")
+        foreach(_s IN LISTS _sl)
+            string(STRIP "${_s}" _s)
+            if(NOT _s STREQUAL "")
+                list(APPEND _list "${_s}")
+            endif()
+        endforeach()
+    endif()
+    set(${out_var} "${_list}" PARENT_SCOPE)
+endfunction()
+
+# Rewrite the [build].include array in <toml> to absolute paths anchored at
+# the REAL PROJECT_DIR. Depth-sensitive sibling-relative entries
+# ("../../../topo-lang-cpp/...", "../../runtime/...") would resolve to a
+# different location from the scratch dir (which lives under the build
+# tree), so every entry becomes absolute. Already-absolute entries pass
+# through (get_filename_component ABSOLUTE is identity for absolute inputs).
+# No-op for tomls without an include array (JVM benchmarks).
+function(_topo_rewrite_include toml)
+    _topo_include_list("${toml}" _incs)
+    if(NOT _incs)
+        return()
+    endif()
+    set(_abs "")
+    foreach(_i IN LISTS _incs)
+        get_filename_component(_abs_i "${PROJECT_DIR}/${_i}" ABSOLUTE)
+        file(TO_CMAKE_PATH "${_abs_i}" _abs_i)
+        if(_abs STREQUAL "")
+            set(_abs "\"${_abs_i}\"")
+        else()
+            set(_abs "${_abs}, \"${_abs_i}\"")
+        endif()
+    endforeach()
+    file(READ "${toml}" _txt)
+    string(REGEX REPLACE "include[ \t]*=[ \t]*\\[[^]]*\\]"
+        "include = [${_abs}]" _new "${_txt}")
+    file(WRITE "${toml}" "${_new}")
+endfunction()
+
+# (Re)create the private scratch copy of the project with depth-sensitive
+# includes rewritten to absolute paths.
+function(_topo_prepare_scratch)
+    file(REMOVE_RECURSE "${_scratch_dir}")
+    file(MAKE_DIRECTORY "${_scratch_dir}")
+    foreach(_sub src topo include)
+        if(IS_DIRECTORY "${PROJECT_DIR}/${_sub}")
+            file(COPY "${PROJECT_DIR}/${_sub}" DESTINATION "${_scratch_dir}")
+        endif()
+    endforeach()
+    foreach(_toml Topo.toml Topo-base.toml Topo-forced.toml)
+        if(EXISTS "${PROJECT_DIR}/${_toml}")
+            file(COPY "${PROJECT_DIR}/${_toml}" DESTINATION "${_scratch_dir}")
+        endif()
+    endforeach()
+    _topo_rewrite_include("${_scratch_dir}/Topo.toml")
+    foreach(_alt Topo-base.toml Topo-forced.toml)
+        if(EXISTS "${_scratch_dir}/${_alt}")
+            _topo_rewrite_include("${_scratch_dir}/${_alt}")
+        endif()
+    endforeach()
+    # Pristine copy of the (rewritten) default toml. Each variant swap
+    # overwrites scratch/Topo.toml; the NEXT variant restores from here so
+    # it builds the right config (the auto variant needs the default back).
+    configure_file("${_scratch_dir}/Topo.toml" "${_scratch_dir}/Topo.toml.default" COPYONLY)
+endfunction()
+
+# Copy the build outputs produced in the scratch dir back into the real
+# project tree (the e2e harness fast path + equivalence cases look for the
+# pre-built binaries and dumped .ll there). Topo*.toml files, the scratch's
+# .topo-cache and its source dirs are NOT copied — the real Topo.toml is
+# never touched by this driver. Root-level build outputs are copied as
+# files; `build/` (vanilla-style layout, JVM jars) is copied as a whole.
+function(_topo_copy_outputs_back)
+    file(GLOB _scratch_root_items "${_scratch_dir}/*")
+    foreach(_item IN LISTS _scratch_root_items)
+        if(IS_DIRECTORY "${_item}")
+            continue()
+        endif()
+        get_filename_component(_fname "${_item}" NAME)
+        # Skip every scratch toml artefact: Topo.toml, Topo.toml.default,
+        # Topo-base.toml, Topo-forced.toml (the scratch copies carry the
+        # absolute-include rewrite and must never land in the real tree).
+        if(_fname MATCHES "^Topo.*toml")
+            continue()
+        endif()
+        file(COPY "${_item}" DESTINATION "${PROJECT_DIR}")
+    endforeach()
+    if(IS_DIRECTORY "${_scratch_dir}/build")
+        file(COPY "${_scratch_dir}/build" DESTINATION "${PROJECT_DIR}")
+    endif()
+endfunction()
+
+# ---------------------------------------------------------------------------
+# Helper: run a single topo-build invocation in <workdir>.
 # Fails the driver (and thus the custom_command) on non-zero exit.
 # ---------------------------------------------------------------------------
-function(_topo_run_build label)
+function(_topo_run_build label workdir)
     message(STATUS "[topo-bench-artifacts] ${PROJECT_DIR}: ${label}")
     # Clean .topo-cache so swapped toml doesn't reuse stale artefacts.
-    file(REMOVE_RECURSE "${_cache_dir}")
+    file(REMOVE_RECURSE "${workdir}/.topo-cache")
     # --no-check: benchmark projects are codegen-coverage fixtures, not
     # check-clean declaration sets; conformance has its own checker suites.
     execute_process(
         COMMAND "${TOPO_BUILD_EXE}" --dump-ir --no-check
-        WORKING_DIRECTORY "${PROJECT_DIR}"
+        WORKING_DIRECTORY "${workdir}"
         RESULT_VARIABLE _rc
         OUTPUT_VARIABLE _out
         ERROR_VARIABLE  _err
@@ -105,7 +234,13 @@ function(_topo_run_build label)
 endfunction()
 
 # ---------------------------------------------------------------------------
-# Helper: swap Topo.toml <- <variant>.toml, invoke _topo_run_build, restore.
+# Helper: swap the SCRATCH Topo.toml <- <variant>.toml, build in scratch,
+# copy the produced outputs back into the real project dir.
+#
+# The swap happens on the scratch copy only; the committed Topo.toml is
+# never written, so no save/restore around the real file is needed — the
+# scratch dir is deleted wholesale at the end of the driver run (or at the
+# next prepare, after an interrupted run).
 # ---------------------------------------------------------------------------
 function(_topo_build_variant label variant_toml)
     if(NOT EXISTS "${variant_toml}")
@@ -114,37 +249,18 @@ function(_topo_build_variant label variant_toml)
         return()
     endif()
 
-    configure_file("${_topo_toml}" "${_saved_toml}" COPYONLY)
-    configure_file("${variant_toml}" "${_topo_toml}" COPYONLY)
+    # Scratch-side swap. No failure-restore path exists by design: any
+    # failure below propagates via FATAL_ERROR and the scratch dir is
+    # simply left for the next invocation's _topo_prepare_scratch to remove.
+    configure_file("${variant_toml}" "${_scratch_dir}/Topo.toml" COPYONLY)
 
-    # Wrap in a pseudo-try: on build failure we MUST restore the toml before
-    # propagating the error, otherwise a retry sees a broken tree. CMake
-    # lacks try/finally, so we capture the error state ourselves.
-    set(_build_failed FALSE)
-    message(STATUS "[topo-bench-artifacts] ${PROJECT_DIR}: ${label}")
-    file(REMOVE_RECURSE "${_cache_dir}")
-    # --no-check: same rationale as _topo_run_build above.
-    execute_process(
-        COMMAND "${TOPO_BUILD_EXE}" --dump-ir --no-check
-        WORKING_DIRECTORY "${PROJECT_DIR}"
-        RESULT_VARIABLE _rc
-        OUTPUT_VARIABLE _out
-        ERROR_VARIABLE  _err
-    )
-    if(NOT _rc EQUAL 0)
-        set(_build_failed TRUE)
-    endif()
+    _topo_run_build("${label}" "${_scratch_dir}")
+    _topo_copy_outputs_back()
 
-    # Restore original Topo.toml — always, even on failure.
-    configure_file("${_saved_toml}" "${_topo_toml}" COPYONLY)
-    file(REMOVE "${_saved_toml}")
-
-    if(_build_failed)
-        message(FATAL_ERROR
-            "[topo-bench-artifacts] ${PROJECT_DIR}: ${label} FAILED (rc=${_rc})\n"
-            "stdout:\n${_out}\n"
-            "stderr:\n${_err}")
-    endif()
+    # Restore the default toml so the NEXT variant (in particular the auto
+    # variant, which must build the committed config as-is) does not build
+    # with this variant's swap still in place.
+    configure_file("${_scratch_dir}/Topo.toml.default" "${_scratch_dir}/Topo.toml" COPYONLY)
 endfunction()
 
 # ---------------------------------------------------------------------------
@@ -279,8 +395,18 @@ function(_topo_vanilla_java)
         message(FATAL_ERROR
             "[topo-bench-artifacts] BUILD_VANILLA_JAVA=ON requires JAVA_HOME=<path>")
     endif()
+    # Windows ships javac.exe/jar.exe; the exists-check must probe both
+    # spellings (the .exe-less probe silently FATALed every windows project
+    # in the first real timing-lane run — issue
+    # jvm-bench-artifacts-windows-javac-exe).
     set(_javac "${JAVA_HOME}/bin/javac")
     set(_jar   "${JAVA_HOME}/bin/jar")
+    if(NOT EXISTS "${_javac}" AND EXISTS "${_javac}.exe")
+        set(_javac "${_javac}.exe")
+    endif()
+    if(NOT EXISTS "${_jar}" AND EXISTS "${_jar}.exe")
+        set(_jar "${_jar}.exe")
+    endif()
     if(NOT EXISTS "${_javac}")
         message(FATAL_ERROR "[topo-bench-artifacts] javac not found at ${_javac}")
     endif()
@@ -341,7 +467,10 @@ endfunction()
 # Main flow.
 # ---------------------------------------------------------------------------
 
-# Guard against leftover .prebuild-saved from a prior crashed run.
+# Guard against leftover .prebuild-saved from a prior crashed run of the
+# OLD in-place-swap driver. The scratch driver never creates this file, but
+# a pre-upgrade interruption may have left one — restoring it keeps the
+# tree self-healing.
 if(EXISTS "${_saved_toml}")
     message(WARNING
         "[topo-bench-artifacts] ${PROJECT_DIR}: found stale ${_saved_toml}; "
@@ -350,6 +479,10 @@ if(EXISTS "${_saved_toml}")
     file(REMOVE "${_saved_toml}")
 endif()
 
+# Prepare the private scratch copy (copies src/topo/include + tomls,
+# rewrites depth-sensitive includes to absolute paths).
+_topo_prepare_scratch()
+
 if(BUILD_VANILLA)
     _topo_vanilla_cpp()
 endif()
@@ -357,12 +490,18 @@ if(BUILD_VANILLA_JAVA)
     _topo_vanilla_java()
 endif()
 
-_topo_build_variant("topo base"   "${_base_toml}")
+_topo_build_variant("topo base"   "${_scratch_dir}/Topo-base.toml")
 
-# auto: use Topo.toml as-is; skip if the project happens to lack one (defensive)
-_topo_run_build("topo auto")
+# auto: the scratch Topo.toml as-is (copy of the real Topo.toml).
+_topo_run_build("topo auto" "${_scratch_dir}")
+_topo_copy_outputs_back()
 
-_topo_build_variant("topo forced" "${_forced_toml}")
+_topo_build_variant("topo forced" "${_scratch_dir}/Topo-forced.toml")
+
+# Drop the scratch copy. It lives under the build dir (never in the source
+# tree), but removing it eagerly keeps the build tree tidy and guarantees a
+# later configure-time glob can never see it.
+file(REMOVE_RECURSE "${_scratch_dir}")
 
 # All variants succeeded — mark the stamp. Use file(TOUCH) so mtime is
 # updated even when the file already exists.
