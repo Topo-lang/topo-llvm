@@ -17,6 +17,66 @@ namespace topo::test::e2e {
 struct RunResult {
     int exitCode = -1;
     std::string output;
+    // True when the command actually reached process spawn. platform's
+    // runProcessCapture returns its default-constructed result (exitCode -1,
+    // empty stdout AND stderr) when process.start() fails — a missing
+    // executable or a missing working directory — a signature that is
+    // otherwise indistinguishable from a real tool exit. topoBuild() flips
+    // this to false when it detects that signature; consumers must treat a
+    // result with spawned == false as a HARD harness failure, never as a
+    // satisfying non-zero exit or as a skip (issue
+    // e2e-harness-spawn-failure-masks-as-pass-or-skip). Defaults to true so
+    // the existing two-field aggregate initialisers keep describing real
+    // process runs.
+    bool spawned = true;
+};
+
+// ---------------------------------------------------------------------------
+// TopoTomlSwap — RAII guard for the Topo-base / Topo-forced swap pattern
+// ---------------------------------------------------------------------------
+//
+// The benchmark harness used to swap ``Topo.toml`` ↔ ``Topo-base.toml`` /
+// ``Topo-forced.toml`` with an ad-hoc save/restore pair around the build
+// call. If the build threw or a gtest ASSERT triggered an early return,
+// the restore never ran and the project's ``Topo.toml`` stayed permanently
+// in the swapped state. This RAII wrapper makes the restore unconditional:
+// the destructor fires on normal exit, on exception unwind, on ASSERT-driven
+// return, and on any other early-exit path the test body can take. Two
+// failure modes remain possible — process kill (SIGKILL) and OS crash — but
+// both leave the saved file present, which the check_clean guards + git
+// status flag. Mirrors topo-jvm's TopoTomlSwap (topo-jvm/test/e2e/
+// E2eHarness.h) so both backends share one swap discipline.
+//
+// Usage:
+//   {
+//       TopoTomlSwap swap(projDir, "Topo-base.toml");
+//       if (!swap.engaged()) return RunResult{-1, swap.error(), false};
+//       result = topoBuild(projectName);
+//   } // destructor restores Topo.toml here, even on early return / throw
+struct TopoTomlSwap {
+    // Move-only; copying would double-restore.
+    TopoTomlSwap(const TopoTomlSwap&) = delete;
+    TopoTomlSwap& operator=(const TopoTomlSwap&) = delete;
+    TopoTomlSwap(TopoTomlSwap&&) = delete;
+    TopoTomlSwap& operator=(TopoTomlSwap&&) = delete;
+
+    /// Swap ``<projDir>/Topo.toml`` against ``<projDir>/<altTomlName>``.
+    /// On failure (alt missing, copy errored) ``engaged()`` returns false
+    /// and ``error()`` carries the diagnostic; in that state the dtor is
+    /// a no-op.
+    TopoTomlSwap(const std::filesystem::path& projDir,
+                 const std::string& altTomlName);
+    ~TopoTomlSwap();
+
+    bool engaged() const { return engaged_; }
+    const std::string& error() const { return error_; }
+
+private:
+    std::filesystem::path projDir_;
+    std::filesystem::path topoToml_;
+    std::filesystem::path saved_;
+    bool engaged_ = false;
+    std::string error_;
 };
 
 // ---------------------------------------------------------------------------

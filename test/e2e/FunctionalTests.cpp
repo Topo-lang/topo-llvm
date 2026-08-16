@@ -286,7 +286,13 @@ TEST_F(Functional, RustBasic) {
     projectsDir_ = fixturesDir_;
 
     auto build = topoBuild("rust_basic");
-    if (build.exitCode != 0) {
+    if (!build.spawned) {
+        // Spawn failure (missing fixture dir, missing topo-build) is a HARD
+        // failure — a skip here would silently drop the fixture coverage
+        // (issue e2e-harness-spawn-failure-masks-as-pass-or-skip).
+        FAIL() << "topo-build could not be spawned for rust_basic — fixture or "
+                  "toolchain missing (not a skip-worthy toolchain limitation)";
+    } else if (build.exitCode != 0) {
         GTEST_SKIP() << "Rust build failed (toolchain may be incomplete): exit code "
                       + std::to_string(build.exitCode);
     }
@@ -681,6 +687,7 @@ TEST_F(Functional, ConfigValidation_AdaptiveMissingDeps) {
     projectsDir_ = fixturesDir_;
 
     auto build = topoBuild("config_validation");
+    ASSERT_TRUE(build.spawned) << "topo-build could not be spawned — validation contract not exercised:\n" << build.output;
     EXPECT_NE(build.exitCode, 0) << "topo-build should fail when [adaptive] enabled=true "
                                     "but embed_ir and parallel.instrument are missing";
 
@@ -726,6 +733,7 @@ TEST_F(Functional, ErrorTopoSyntax) {
     projectsDir_ = fixturesDir_;
 
     auto build = topoBuild("error_topo_syntax");
+    ASSERT_TRUE(build.spawned) << "topo-build could not be spawned — syntax-error contract not exercised:\n" << build.output;
     EXPECT_NE(build.exitCode, 0) << "topo-build should fail on .topo syntax error";
 
     projectsDir_ = savedProjects;
@@ -738,6 +746,7 @@ TEST_F(Functional, ErrorInvalidToml) {
     projectsDir_ = fixturesDir_;
 
     auto build = topoBuild("error_invalid_toml");
+    ASSERT_TRUE(build.spawned) << "topo-build could not be spawned — invalid-toml contract not exercised:\n" << build.output;
     EXPECT_NE(build.exitCode, 0) << "topo-build should fail on invalid output_type 'banana'";
 
     projectsDir_ = savedProjects;
@@ -755,6 +764,7 @@ TEST_F(Functional, ErrorLinkFailure) {
     projectsDir_ = fixturesDir_;
 
     auto build = topoBuild("error_link_failure");
+    ASSERT_TRUE(build.spawned) << "topo-build could not be spawned — link-failure contract not exercised:\n" << build.output;
     EXPECT_NE(build.exitCode, 0) << "topo-build should fail when declared public function has no implementation";
 
     projectsDir_ = savedProjects;
@@ -782,7 +792,41 @@ TEST_F(Functional, CheckerCompletenessViolation) {
     projectsDir_ = fixturesDir_;
 
     auto build = topoBuild("checker_completeness_violation");
+    ASSERT_TRUE(build.spawned) << "topo-build could not be spawned — completeness-violation contract not exercised:\n" << build.output;
     EXPECT_NE(build.exitCode, 0) << "topo-build should fail when .topo declares a function missing from host code";
+
+    projectsDir_ = savedProjects;
+}
+
+// --- Spawn-failure regression ---
+//
+// A spawn failure (missing exe, missing fixture cwd) surfaces as
+// exitCode -1 + empty output from runProcessCapture — the same in-band
+// value a real tool exit could produce. The harness must flag it
+// explicitly (RunResult::spawned == false) so consumers hard-fail instead
+// of passing vacuously (EXPECT_NE(exitCode, 0)) or skipping (RustBasic).
+// Issue: e2e-harness-spawn-failure-masks-as-pass-or-skip.
+
+TEST_F(Functional, SpawnFailureDetected) {
+    auto savedProjects = projectsDir_;
+    projectsDir_ = fixturesDir_;
+
+    // Point topoBuildExe_ at a nonexistent executable — spawn fails before
+    // any fixture is touched.
+    auto savedExe = topoBuildExe_;
+    topoBuildExe_ = savedExe.parent_path() / "topo-build-does-not-exist";
+
+    auto missingExe = topoBuild("checker_completeness_pass");
+    EXPECT_FALSE(missingExe.spawned)
+        << "a missing topo-build executable must be reported as a spawn "
+           "failure, not as a legitimate exit code";
+    EXPECT_EQ(missingExe.exitCode, -1);
+
+    // Missing project dir → spawn fails on the working-directory change.
+    topoBuildExe_ = savedExe;
+    auto missingDir = topoBuild("no_such_fixture_project");
+    EXPECT_FALSE(missingDir.spawned)
+        << "a missing project directory must be reported as a spawn failure";
 
     projectsDir_ = savedProjects;
 }

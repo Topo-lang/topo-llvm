@@ -50,6 +50,13 @@ topo_finalize_bench_artifacts_target()
 # checker is registered for mixed); the skip below keys on that marker, so
 # an opt-out is always visible in the project's own Topo.toml. Single label
 # only — multi-label LABELS strings mis-parse (see test/e2e LABELS note).
+#
+# RESOURCE_LOCK pairs each guard with the e2e cases on the same project:
+# those swap Topo.toml in place (TopoTomlSwap RAII, test/e2e/E2eHarness.cpp)
+# and a concurrent topo-check read of a swapped file would check the wrong
+# config (issue e2e-inplace-toml-swap-race-dirties-tree). The lock name must
+# stay in lockstep with the PREFIX in test/e2e/CMakeLists.txt's
+# topo_inject_e2e_project_locks calls (topo_e2e_llvm).
 file(GLOB _topo_bench_tomls "${CMAKE_CURRENT_SOURCE_DIR}/*/Topo.toml")
 foreach(_toml IN LISTS _topo_bench_tomls)
     file(READ "${_toml}" _toml_content)
@@ -60,6 +67,8 @@ foreach(_toml IN LISTS _topo_bench_tomls)
     get_filename_component(_proj "${_proj_dir}" NAME)
     add_test(NAME e2e.check_clean.${_proj}
         COMMAND $<TARGET_FILE:topo::cli::topo-check> --project "${_proj_dir}")
-    set_tests_properties(e2e.check_clean.${_proj} PROPERTIES LABELS "e2e")
+    set_tests_properties(e2e.check_clean.${_proj} PROPERTIES
+        LABELS "e2e"
+        RESOURCE_LOCK "topo_e2e_llvm_${_proj}")
 endforeach()
 unset(_toml_content)

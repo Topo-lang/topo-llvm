@@ -42,6 +42,55 @@ void warnMissingPrebuilt(const std::string& projectName,
 } // namespace
 
 // ============================================================================
+// TopoTomlSwap RAII guard
+// ============================================================================
+
+TopoTomlSwap::TopoTomlSwap(const fs::path& projDir, const std::string& altTomlName)
+    : projDir_(projDir),
+      topoToml_(projDir / "Topo.toml"),
+      saved_(projDir / "Topo.toml.saved") {
+    fs::path alt = projDir / altTomlName;
+    if (!fs::exists(alt)) {
+        error_ = altTomlName + " not found in " + projDir.generic_string();
+        return;
+    }
+    try {
+        overwriteCopy(topoToml_, saved_);
+        overwriteCopy(alt, topoToml_);
+    } catch (const fs::filesystem_error& e) {
+        // The saved file may already be on disk — try a best-effort restore
+        // before reporting.
+        try {
+            if (fs::exists(saved_)) {
+                overwriteCopy(saved_, topoToml_);
+                fs::remove(saved_);
+            }
+        } catch (...) {
+        }
+        error_ = std::string("failed to swap ") + altTomlName +
+                 " into Topo.toml: " + e.what();
+        return;
+    }
+    engaged_ = true;
+}
+
+TopoTomlSwap::~TopoTomlSwap() {
+    if (!engaged_) return;
+    // Best-effort restore — destructor must not throw. If restoration fails
+    // (very unusual: project tree gone, disk full) the saved file is left in
+    // place so a developer / CI tripwire can recover by hand.
+    try {
+        overwriteCopy(saved_, topoToml_);
+        fs::remove(saved_);
+    } catch (const fs::filesystem_error& e) {
+        std::cerr << "[e2e] TopoTomlSwap: failed to restore "
+                  << topoToml_.generic_string() << " from "
+                  << saved_.generic_string() << ": " << e.what()
+                  << " — saved copy left for manual recovery\n";
+    }
+}
+
+// ============================================================================
 // SetUp
 // ============================================================================
 
@@ -161,7 +210,17 @@ RunResult E2eFixture::topoBuild(const std::string& projectName,
     // RunResult.output on failure, so dropping stderr left every standalone
     // build failure showing only "[1/2] CC …" with no cause. A build's output
     // is never compared (only runBinary's stdout is), so merging is safe here.
-    return RunResult{r.exitCode, r.stdoutOutput + r.stderrOutput};
+    RunResult result{r.exitCode, r.stdoutOutput + r.stderrOutput};
+    // Spawn-failure signature: runProcessCapture returns its
+    // default-constructed result (exitCode -1, empty stdout AND stderr) when
+    // process.start() fails — missing exe / missing cwd — on both backends
+    // (topo-core Platform/Process.cpp runCapture / runCaptureWindows). That
+    // signature is indistinguishable from a real tool exit, so it is surfaced
+    // explicitly on RunResult; consumers must hard-fail on !spawned instead
+    // of reading the -1 as a satisfying exit or a skip (issue
+    // e2e-harness-spawn-failure-masks-as-pass-or-skip).
+    result.spawned = !(r.exitCode == -1 && r.stdoutOutput.empty() && r.stderrOutput.empty());
+    return result;
 }
 
 // ============================================================================
@@ -182,17 +241,17 @@ RunResult E2eFixture::topoBaseBuild(const std::string& projectName,
         warnMissingPrebuilt(projectName, expectedOutput);
     }
 
-    fs::path topoToml = projDir / "Topo.toml";
-    fs::path baseToml = projDir / "Topo-base.toml";
-    fs::path saved = projDir / "Topo.toml.saved";
-
-    if (!fs::exists(baseToml)) {
-        return RunResult{-1, "Topo-base.toml not found in " + projDir.generic_string()};
+    // RAII swap — the destructor restores Topo.toml on normal exit, on
+    // exception unwind, on ASSERT-driven early return, and on any other
+    // early-exit path, so an interrupted build can no longer leave the
+    // benchmark dir permanently swapped (issue
+    // e2e-inplace-toml-swap-race-dirties-tree). Mirrors topo-jvm's
+    // TopoTomlSwap; per-project RESOURCE_LOCKs in the ctest registration
+    // serialise same-project cases so two swaps never interleave.
+    TopoTomlSwap swap(projDir, "Topo-base.toml");
+    if (!swap.engaged()) {
+        return RunResult{-1, swap.error(), /*spawned=*/false};
     }
-
-    // Swap Topo.toml → Topo-base.toml
-    overwriteCopy(topoToml, saved);
-    overwriteCopy(baseToml, topoToml);
 
     // Clean incremental cache
     {
@@ -200,13 +259,7 @@ RunResult E2eFixture::topoBaseBuild(const std::string& projectName,
         fs::remove_all(projDir / ".topo-cache", ec);
     }
 
-    auto result = topoBuild(projectName);
-
-    // Restore original
-    overwriteCopy(saved, topoToml);
-    fs::remove(saved);
-
-    return result;
+    return topoBuild(projectName);
 }
 
 // ============================================================================
@@ -226,17 +279,11 @@ RunResult E2eFixture::topoForcedBuild(const std::string& projectName,
         warnMissingPrebuilt(projectName, expectedOutput);
     }
 
-    fs::path topoToml = projDir / "Topo.toml";
-    fs::path forcedToml = projDir / "Topo-forced.toml";
-    fs::path saved = projDir / "Topo.toml.saved";
-
-    if (!fs::exists(forcedToml)) {
-        return RunResult{-1, "Topo-forced.toml not found in " + projDir.generic_string()};
+    // RAII swap — see topoBaseBuild for the rationale.
+    TopoTomlSwap swap(projDir, "Topo-forced.toml");
+    if (!swap.engaged()) {
+        return RunResult{-1, swap.error(), /*spawned=*/false};
     }
-
-    // Swap Topo.toml → Topo-forced.toml
-    overwriteCopy(topoToml, saved);
-    overwriteCopy(forcedToml, topoToml);
 
     // Clean incremental cache
     {
@@ -244,13 +291,7 @@ RunResult E2eFixture::topoForcedBuild(const std::string& projectName,
         fs::remove_all(projDir / ".topo-cache", ec);
     }
 
-    auto result = topoBuild(projectName);
-
-    // Restore original
-    overwriteCopy(saved, topoToml);
-    fs::remove(saved);
-
-    return result;
+    return topoBuild(projectName);
 }
 
 // ============================================================================
