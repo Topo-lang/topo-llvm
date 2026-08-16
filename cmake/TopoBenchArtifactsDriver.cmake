@@ -93,21 +93,6 @@ if(DEFINED BACKEND_TOOL_DIRS AND NOT BACKEND_TOOL_DIRS STREQUAL "")
     endforeach()
 endif()
 
-# Mirror the e2e harness's JVM env injection (test/e2e/E2eHarness.cpp SetUp):
-# ${JAVA_HOME}/bin must precede the inherited PATH so topo-build's child
-# chain resolves the same modules the proven harness env does. On
-# windows-2022 the FIRST real driver run showed topo-build dying at load
-# (exit 0xc0000139, empty output) in the driver env while the harness
-# launched it fine on the same leg — the delta was exactly this entry.
-if(DEFINED JAVA_HOME AND NOT JAVA_HOME STREQUAL "")
-    if(WIN32)
-        set(_path_sep ";")
-    else()
-        set(_path_sep ":")
-    endif()
-    set(ENV{PATH} "${JAVA_HOME}/bin${_path_sep}$ENV{PATH}")
-endif()
-
 set(_topo_toml       "${PROJECT_DIR}/Topo.toml")
 set(_saved_toml      "${PROJECT_DIR}/Topo.toml.prebuild-saved")
 set(_scratch_dir     "${STAMP_FILE}-scratch")
