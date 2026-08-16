@@ -20,10 +20,9 @@ concurrency:
 
 env:
   # TOPO_CORE_REF / TOPO_LANG_CPP_REF (and the benchmark job's TOPO_CLI_REF /
-  # TOPO_LANG_RUST_REF) are temporarily pinned to dev: the [build.cpp].flags
-  # chain (BuildConfig::cppFlags) lands across topo-core / topo-cli /
-  # topo-lang-cpp in lockstep. Restore to main once those merge.
-  TOPO_CORE_REF: dev
+  # TOPO_LANG_RUST_REF) unpinned at promotion (2026-08-16): the
+  # [build.cpp].flags chain (BuildConfig::cppFlags) is on main now.
+  TOPO_CORE_REF: main
   # topo-llvm core links topo::core::TopoBuildLib (lib/Build) which is
   # gated behind find_package(topo-lang) in topo-core. Install topo-lang
   # too so the topo-core re-install includes lib/Build in its export.
@@ -34,7 +33,7 @@ env:
   # in topo-lang-cpp/runtime/include/topo/ and are always installed under
   # the default scope. find_path(TOPO_LANG_CPP_RUNTIME_INCLUDE) in
   # topo-llvm/CMakeLists.txt picks them up from the install prefix.
-  TOPO_LANG_CPP_REF: dev
+  TOPO_LANG_CPP_REF: main
 
 jobs:
   # ── Core scope build + test ────────
@@ -348,10 +347,10 @@ jobs:
         # build-and-test job proves); first windows iterations are blind.
         os: [ubuntu-24.04, macos-14, windows-2022]
     env:
-      # Pinned to dev with the top-level TOPO_CORE_REF / TOPO_LANG_CPP_REF —
-      # see the comment on the workflow env block.
-      TOPO_LANG_RUST_REF: dev
-      TOPO_CLI_REF: dev
+      # Unpinned at promotion with the top-level TOPO_CORE_REF /
+      # TOPO_LANG_CPP_REF — see the comment on the workflow env block.
+      TOPO_LANG_RUST_REF: main
+      TOPO_CLI_REF: main
     steps:
       - uses: actions/checkout@v5
       # ninja + clangd are required. libpython3.11 is also required: the
