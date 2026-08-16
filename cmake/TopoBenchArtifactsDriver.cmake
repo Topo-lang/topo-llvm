@@ -241,6 +241,27 @@ function(_topo_run_build label workdir)
         ERROR_VARIABLE  _err
     )
     if(NOT _rc EQUAL 0)
+        # Windows loader diagnostic: a pre-main death (0xc0000139/0xc0000135
+        # class, empty output) names no mechanism from cmake's side — run the
+        # same exe through PowerShell, which surfaces the Win32 error text,
+        # and list the exe's own directory so a missing/wrong sibling DLL is
+        # visible. Written to a .ps1 to avoid cmake→powershell argv quoting.
+        if(WIN32)
+            file(WRITE "${_scratch_dir}/_topo_diag.ps1"
+"Set-Location -LiteralPath '${workdir}'
+& '${TOPO_BUILD_EXE}' --dump-ir --no-check
+Write-Host \"ps-spawn-rc=\$LASTEXITCODE\"
+Write-Host \"exe dir contents:\"
+Get-ChildItem (Split-Path '${TOPO_BUILD_EXE}') | Select-Object -ExpandProperty Name
+Write-Host \"PATH=\$env:PATH\"")
+            execute_process(
+                COMMAND powershell -NoProfile -ExecutionPolicy Bypass
+                    -File "${_scratch_dir}/_topo_diag.ps1"
+                OUTPUT_VARIABLE _ps_out
+                ERROR_VARIABLE _ps_err
+            )
+            message(STATUS "  [windows loader diagnostic]\n${_ps_out}\n${_ps_err}")
+        endif()
         message(FATAL_ERROR
             "[topo-bench-artifacts] ${PROJECT_DIR}: ${label} FAILED (rc=${_rc})\n"
             "stdout:\n${_out}\n"
