@@ -127,6 +127,39 @@ function(_topo_include_list toml_path out_var)
     set(${out_var} "${_list}" PARENT_SCOPE)
 endfunction()
 
+# Parse [build.rust].manifest (single line, stable shape — the same
+# assumption as _topo_include_list). Mixed C++/Rust benchmarks (mixed_lang)
+# point topo-build at a crate manifest OUTSIDE src/topo/include; the crate
+# dir must mirror into the scratch too, or topo-build fails with
+# "Rust manifest not found".
+function(_topo_manifest_path toml_path out_var)
+    file(READ "${toml_path}" _t)
+    set(_m "")
+    string(REGEX MATCH "manifest[ \t]*=[ \t]*\"([^\"]+)\"" _ "${_t}")
+    if(CMAKE_MATCH_1)
+        set(_m "${CMAKE_MATCH_1}")
+    endif()
+    set(${out_var} "${_m}" PARENT_SCOPE)
+endfunction()
+
+# Collect every "quoted" value on the <key> = ... line (array or single
+# string). Stable single-line shape, same assumption as _topo_include_list;
+# comments quoting the key name would false-positive, but benchmark tomls
+# keep these lines bare.
+function(_topo_key_values toml_path key out_var)
+    file(READ "${toml_path}" _t)
+    string(REGEX MATCH "${key}[ \t]*=[ \t]*[^\n]*" _line "${_t}")
+    set(_vals "")
+    if(_line)
+        string(REGEX MATCHALL "\"[^\"]*\"" _quoted "${_line}")
+        foreach(_q IN LISTS _quoted)
+            string(REPLACE "\"" "" _v "${_q}")
+            list(APPEND _vals "${_v}")
+        endforeach()
+    endif()
+    set(${out_var} "${_vals}" PARENT_SCOPE)
+endfunction()
+
 # Rewrite the [build].include array in <toml> to absolute paths anchored at
 # the REAL PROJECT_DIR. Depth-sensitive sibling-relative entries
 # ("../../../topo-lang-cpp/...", "../../runtime/...") would resolve to a
@@ -155,6 +188,43 @@ function(_topo_rewrite_include toml)
     file(WRITE "${toml}" "${_new}")
 endfunction()
 
+# Reference-integrity check: every project-relative path a scratch toml
+# points at (manifest, root, sources globs) must exist in the scratch copy.
+# A missing reference means the mirror list above is out of date — fail here
+# with the concrete missing path instead of a later indirect topo-build
+# error (or, worse, a silent nightly regression). include is skipped: it was
+# already re-anchored at the REAL project tree by _topo_rewrite_include.
+function(_topo_verify_scratch_refs toml)
+    _topo_manifest_path("${toml}" _m)
+    if(_m AND NOT EXISTS "${_scratch_dir}/${_m}")
+        message(FATAL_ERROR
+            "[topo-bench-artifacts] ${toml}: manifest '${_m}' missing in the scratch copy — "
+            "its parent dir must be mirrored by _topo_prepare_scratch")
+    endif()
+    _topo_key_values("${toml}" "root" _roots)
+    foreach(_r IN LISTS _roots)
+        if(NOT EXISTS "${_scratch_dir}/${_r}")
+            message(FATAL_ERROR
+                "[topo-bench-artifacts] ${toml}: root '${_r}' missing in the scratch copy")
+        endif()
+    endforeach()
+    _topo_key_values("${toml}" "sources" _srcs)
+    foreach(_s IN LISTS _srcs)
+        string(FIND "${_s}" "*" _star)
+        if(_star GREATER -1)
+            # Glob ("src/*.cpp"): the static prefix must be a scratch dir.
+            string(SUBSTRING "${_s}" 0 "${_star}" _prefix)
+            if(NOT IS_DIRECTORY "${_scratch_dir}/${_prefix}")
+                message(FATAL_ERROR
+                    "[topo-bench-artifacts] ${toml}: sources glob '${_s}' dir missing in the scratch copy")
+            endif()
+        elseif(NOT EXISTS "${_scratch_dir}/${_s}")
+            message(FATAL_ERROR
+                "[topo-bench-artifacts] ${toml}: sources '${_s}' missing in the scratch copy")
+        endif()
+    endforeach()
+endfunction()
+
 # (Re)create the private scratch copy of the project with depth-sensitive
 # includes rewritten to absolute paths.
 function(_topo_prepare_scratch)
@@ -165,15 +235,39 @@ function(_topo_prepare_scratch)
             file(COPY "${PROJECT_DIR}/${_sub}" DESTINATION "${_scratch_dir}")
         endif()
     endforeach()
+    # Also mirror every [build.rust].manifest-referenced dir (mixed C++/Rust
+    # benchmarks: manifest = "rust_lib/Cargo.toml" — the crate dir is not
+    # under src/topo/include). Cargo's target/ build cache is excluded
+    # (file(COPY) does not honour .gitignore); a root-level manifest only
+    # needs the file itself, not a whole-dir copy.
+    set(_mirrored_manifest_dirs "")
     foreach(_toml Topo.toml Topo-base.toml Topo-forced.toml)
         if(EXISTS "${PROJECT_DIR}/${_toml}")
             file(COPY "${PROJECT_DIR}/${_toml}" DESTINATION "${_scratch_dir}")
+            _topo_manifest_path("${PROJECT_DIR}/${_toml}" _m)
+            if(_m)
+                get_filename_component(_m_dir "${_m}" DIRECTORY)
+                if(_m_dir STREQUAL "")
+                    file(COPY "${PROJECT_DIR}/${_m}" DESTINATION "${_scratch_dir}")
+                elseif(NOT _m_dir IN_LIST _mirrored_manifest_dirs)
+                    list(APPEND _mirrored_manifest_dirs "${_m_dir}")
+                    file(COPY "${PROJECT_DIR}/${_m_dir}" DESTINATION "${_scratch_dir}"
+                         PATTERN "target" EXCLUDE)
+                endif()
+            endif()
         endif()
     endforeach()
     _topo_rewrite_include("${_scratch_dir}/Topo.toml")
     foreach(_alt Topo-base.toml Topo-forced.toml)
         if(EXISTS "${_scratch_dir}/${_alt}")
             _topo_rewrite_include("${_scratch_dir}/${_alt}")
+        endif()
+    endforeach()
+    # Reference-integrity check: catch any unmirrored path reference in the
+    # scratch tomls here (manifest/root/sources), not in a later topo-build.
+    foreach(_toml Topo.toml Topo-base.toml Topo-forced.toml)
+        if(EXISTS "${_scratch_dir}/${_toml}")
+            _topo_verify_scratch_refs("${_scratch_dir}/${_toml}")
         endif()
     endforeach()
     # Pristine copy of the (rewritten) default toml. Each variant swap
