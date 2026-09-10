@@ -315,11 +315,10 @@ jobs:
   #   3. lang-cpp + lang-rust with ENABLE_LLVM=ON, then topo-cli.
   #   4. reconfigure the same checkout with TOOLS + BENCHMARKS ON and run.
   # Built fresh every run (no upstream cache) so the LLVM-dependent layer can
-  # never link a stale topo-llvm — slow, but acceptable for a nightly. Linux
-  # only; perf NOT excluded — PassFiredMarker / pass-event equivalence prove
-  # each pass took effect, and the four-way (vanilla/base/auto/forced)
-  # category contracts gate timing regressions (the harness self-demotes a
-  # timing ERROR to WARN under high run-to-run variance).
+  # never link a stale topo-llvm. All three platforms run functional,
+  # equivalence and pass-fired checks; perf/benchmark labels are excluded.
+  # Dedicated local/manual performance runs retain timing measurements and
+  # their category contracts separately from this functional CI gate.
   benchmark:
     # The deterministic e2e (functional + equivalence + pass-fired) now gates
     # push + PR too — not just schedule/dispatch. This job runs ONLY the

@@ -1,4 +1,5 @@
 #include "E2eHarness.h"
+#include "ObservabilityBenchmark.h"
 
 #include <cstdio>
 #include <filesystem>
@@ -14,8 +15,8 @@ namespace topo::test::e2e {
 // `runFourWay` / `runAlwaysOn`, but those helpers now pass the expected
 // output binary name into `topoBaseBuild` / `topoBuild` / `topoForcedBuild`,
 // which short-circuit to a no-op when the binary already exists. This keeps
-// the benchmark code unchanged while enabling `ctest -L benchmark -j N`
-// real parallelism (no more RESOURCE_LOCK on benchmark cases). The inline
+// parallel artifact builds under `ctest -L benchmark -j N`; timed cases
+// share the `topo_bench_measure` resource lock. The inline
 // build path remains as a fallback for ad-hoc `./topo-e2e-pass-bench` runs
 // outside CTest.
 
@@ -34,7 +35,7 @@ namespace topo::test::e2e {
 //   RESULT_US_FRIENDLY=<median_us>
 //   RESULT_US_UNFRIENDLY=<median_us>
 //
-// CTest label: "pass_bench" — excluded from default CI runs.
+// CTest labels: "e2e;perf;benchmark" — excluded from default CI runs.
 // ============================================================================
 
 namespace fs = std::filesystem;
@@ -60,6 +61,7 @@ struct BenchResult {
     BenchStats baseStats;
     BenchStats autoStats;
     BenchStats forcedStats;
+    std::vector<std::string> executionErrors;
 };
 
 // Subclass to add benchmark-specific helpers.
@@ -163,13 +165,14 @@ protected:
     //     `topoForced` doubles so a single outlier sample (e.g. one binary
     //     run that happened to coincide with a spotlight indexer burst)
     //     no longer dominates the ratio that assertions read.
-    BenchResult runFourWay(const std::string& project,
+    std::vector<BenchResult> runFourWayBatches(int batchCount,
+                           const std::string& project,
                            const std::string& vanillaOutput,
                            const std::string& topoBaseOutput,
                            const std::string& topoAutoOutput,
                            const std::string& topoForcedOutput,
                            const std::string& resultLabel) {
-        BenchResult r;
+        std::vector<BenchResult> results(batchCount);
 
         if (topoForcedOutput.empty()) {
             ADD_FAILURE() << project << ": runFourWay requires a non-empty "
@@ -181,7 +184,8 @@ protected:
                           << "name here. The auto-mode contract requires "
                           << "an opt-in pass to expose a forced build "
                           << "for benchmarking.";
-            return r;
+            results.front().executionErrors.push_back("missing forced binary name");
+            return results;
         }
 
         // --- Builds (sequential, no-op on the pre-built path) ---
@@ -194,7 +198,10 @@ protected:
 
         auto baseBuild = topoBaseBuild(project, topoBaseOutput);
         EXPECT_EQ(baseBuild.exitCode, 0) << "Topo-base build failed:\n" << baseBuild.output;
-        if (baseBuild.exitCode != 0) return r;
+        if (baseBuild.exitCode != 0) {
+            results.front().executionErrors.push_back("base build failed:\n" + baseBuild.output);
+            return results;
+        }
 
         {
             std::error_code ec;
@@ -202,7 +209,10 @@ protected:
         }
         auto autoBuild = topoBuild(project, topoAutoOutput);
         EXPECT_EQ(autoBuild.exitCode, 0) << "Topo-auto build failed:\n" << autoBuild.output;
-        if (autoBuild.exitCode != 0) return r;
+        if (autoBuild.exitCode != 0) {
+            results.front().executionErrors.push_back("auto build failed:\n" + autoBuild.output);
+            return results;
+        }
 
         {
             std::error_code ec;
@@ -210,47 +220,81 @@ protected:
         }
         auto forcedBuild = topoForcedBuild(project, topoForcedOutput);
         EXPECT_EQ(forcedBuild.exitCode, 0) << "Topo-forced build failed:\n" << forcedBuild.output;
-        if (forcedBuild.exitCode != 0) return r;
+        if (forcedBuild.exitCode != 0) {
+            results.front().executionErrors.push_back("forced build failed:\n" + forcedBuild.output);
+            return results;
+        }
 
         // --- Interleaved measurement ---
         //
         // Order: vanilla → base → auto → forced. Probes for which we have
         // no binary are stored as null fns; the interleaved harness still
         // writes a zero-runs BenchStats so caller indexing stays stable.
-        std::vector<std::function<double()>> probes(4);
-        auto makeProbe = [this, project, resultLabel](const std::string& out) -> std::function<double()> {
-            if (out.empty()) return nullptr;
-            return [this, project, out, resultLabel]() {
-                auto br = runBinary(project, out);
-                if (br.exitCode != 0) return -1.0;
-                return extractResultUs(br.output, resultLabel);
+        // All batches share these binaries; no build/cache mutation occurs
+        // between batches. The existing one-batch callers keep their original
+        // sampling and assertions. Confirmation batches retain every fault.
+        for (auto& r : results) {
+            std::vector<std::function<double()>> probes(4);
+            auto makeProbe = [this, project, resultLabel, batchCount, &r]
+                (const std::string& out) -> std::function<double()> {
+                if (out.empty()) return nullptr;
+                return [this, project, out, resultLabel, batchCount, &r]() {
+                    if (batchCount > 1) {
+                        try {
+                            return readObservabilitySample(runBinary(project, out),
+                                resultLabel, out, r.executionErrors);
+                        } catch (const std::exception& error) {
+                            r.executionErrors.push_back(out + ": " + error.what());
+                            return -1.0;
+                        } catch (...) {
+                            r.executionErrors.push_back(out + ": unknown execution exception");
+                            return -1.0;
+                        }
+                    }
+                    auto br = runBinary(project, out);
+                    if (br.exitCode != 0) return -1.0;
+                    return extractResultUs(br.output, resultLabel);
+                };
             };
-        };
-        probes[0] = haveVanilla ? makeProbe(vanillaOutput) : nullptr;
-        probes[1] = makeProbe(topoBaseOutput);
-        probes[2] = makeProbe(topoAutoOutput);
-        probes[3] = makeProbe(topoForcedOutput);
+            probes[0] = haveVanilla ? makeProbe(vanillaOutput) : nullptr;
+            probes[1] = makeProbe(topoBaseOutput);
+            probes[2] = makeProbe(topoAutoOutput);
+            probes[3] = makeProbe(topoForcedOutput);
 
-        auto statsVec = measureWithVarianceAdaptInterleaved(probes);
-        r.vanillaStats = statsVec[0];
-        r.baseStats    = statsVec[1];
-        r.autoStats    = statsVec[2];
-        r.forcedStats  = statsVec[3];
+            auto statsVec = batchCount > 1 ?
+                measureWithVarianceAdaptInterleaved(probes, kObserveMinSamples,
+                    kObserveMaxRounds, kObserveCvTarget) :
+                measureWithVarianceAdaptInterleaved(probes);
+            r.vanillaStats = statsVec[0];
+            r.baseStats    = statsVec[1];
+            r.autoStats    = statsVec[2];
+            r.forcedStats  = statsVec[3];
 
-        // Legacy doubles read by the assertion helpers. Use median rather
-        // than mean — median is robust to single-sample CPU-spike
-        // outliers that were the dominant source of run-to-run ratio
-        // drift before the interleaved sampling order took effect.
-        r.vanillaO2  = r.vanillaStats.median;
-        r.topoBase   = r.baseStats.median;
-        r.topoAuto   = r.autoStats.median;
-        r.topoForced = r.forcedStats.median;
+            // Legacy doubles read by the assertion helpers. Use median rather
+            // than mean — median is robust to single-sample CPU-spike
+            // outliers that were the dominant source of run-to-run ratio
+            // drift before the interleaved sampling order took effect.
+            r.vanillaO2  = r.vanillaStats.median;
+            r.topoBase   = r.baseStats.median;
+            r.topoAuto   = r.autoStats.median;
+            r.topoForced = r.forcedStats.median;
 
-        EXPECT_GT(r.baseStats.runs, 0)   << "Topo-base run failed for "   << project;
-        EXPECT_GT(r.autoStats.runs, 0)   << "Topo-auto run failed for "   << project;
-        EXPECT_GT(r.forcedStats.runs, 0) << "Topo-forced run failed for " << project;
+            EXPECT_GT(r.baseStats.runs, 0)   << "Topo-base run failed for "   << project;
+            EXPECT_GT(r.autoStats.runs, 0)   << "Topo-auto run failed for "   << project;
+            EXPECT_GT(r.forcedStats.runs, 0) << "Topo-forced run failed for " << project;
+        }
 
-        return r;
+        return results;
+    }
+
+    BenchResult runFourWay(const std::string& project,
+                           const std::string& vanillaOutput,
+                           const std::string& topoBaseOutput,
+                           const std::string& topoAutoOutput,
+                           const std::string& topoForcedOutput,
+                           const std::string& resultLabel) {
+        return runFourWayBatches(1, project, vanillaOutput, topoBaseOutput,
+            topoAutoOutput, topoForcedOutput, resultLabel).front();
     }
 
     // Run an always-on benchmark: vanilla O2 + topo (base = auto = forced).
@@ -815,10 +859,30 @@ CATEGORY_BENCH_TEST_F(COVERED, PassBench, LoopParallel_Unfriendly) {
 // PB12: Observability (28_observability)
 // ---------------------------------------------------------------------------
 //
-// ObservabilityPass is instrumentation-only — no runtime speedup by design,
-// so there is no perf benchmark here. Functional assertions (symbol-presence,
-// span-event emission, auto/base overhead bound) live in EquivalenceTests.cpp
-// (Observability_FunctionalEvents).
+// The timed workload runs after tracing shutdown and measures the residual
+// inserted calls/state checks. Functional IR markers and active trace events
+// remain in Equivalence.Observability_FunctionalEvents, in daily CI.
+CATEGORY_BENCH_TEST_F(INSTRUMENT, PassBench, Observability_Overhead) {
+    const auto measured = runFourWayBatches(kObserveBatches, "observability", "",
+        "observability_base", "observability", "observability_forced", "RESULT_US_FRIENDLY");
+    std::vector<ObservabilityBatch> batches;
+    for (const auto& result : measured)
+        batches.push_back({result.baseStats, result.autoStats, result.forcedStats,
+                           result.executionErrors});
+    const auto assessment = assessObservability(batches);
+    const auto report = observabilityReport(batches, assessment);
+    RecordProperty("performance_outcome", observabilityOutcomeName(assessment.outcome));
+    RecordProperty("performance_report", report);
+    std::printf("[ PERFORMANCE_JSON ] %s\n", report.c_str());
+    const auto summary = summarizeObservability({assessment.outcome});
+    std::printf("[ PERFORMANCE_SUMMARY ] passed=%d regressions=%d unverified=%d execution_errors=%d\n",
+                summary.passed, summary.regressions, summary.unverified, summary.executionErrors);
+
+    if (assessment.outcome == ObservabilityOutcome::Inconclusive) {
+        GTEST_SKIP() << "Observability performance unverified: " << report;
+    }
+    EXPECT_EQ(assessment.outcome, ObservabilityOutcome::Pass) << report;
+}
 
 // ---------------------------------------------------------------------------
 // PB13: Class/Template (08_class_template)

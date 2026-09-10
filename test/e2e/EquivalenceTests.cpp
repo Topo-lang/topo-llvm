@@ -1270,10 +1270,9 @@ TEST_F(Equivalence, Adaptive_FunctionalDispatch) {
 //     base (observability=off) does not.
 //   - Running the auto binary with tracing active emits >= 1 span event
 //     (the correctness-check `execute(10)` under `topo_trace_init`).
-//   - The timed RESULT_US_* portion runs with tracing shut down, so
-//     the auto/base ratio is measuring raw call-site overhead. Relaxed
-//     upper bound `auto/base < 1.25` — one-shot ratio has +/-5% noise band
-//     on this harness.
+//   - Functional output remains equal after removing trace/timing lines.
+// Residual call/state-check overhead after tracing shutdown is measured by
+// PassBench_INSTRUMENT_Observability_Overhead, excluded from daily CI.
 //
 // The "auto binary contains `topo_trace_span_begin` / base does not" shape
 // that previously lived here is *not* a pass-fired signal: main.cpp directly
@@ -1286,23 +1285,14 @@ TEST_F(Equivalence, Adaptive_FunctionalDispatch) {
 // The honest pass-fired signal is the IR marker; symbol presence is a
 // property of the link graph, not of pass firing.
 //
-// Note the equivalence counterpart `ObservabilityPass_BaseMatchesDefault` /
-// `_ForcedMatchesVanilla` already verify stdout equivalence with trace lines
-// stripped; this test is the complementary "pass fired / events emitted /
-// overhead bounded" guard.
+// The ObservabilityPass_BaseMatchesDefault, ObservabilityPass_BaseMatchesForced,
+// and ObservabilityPass_DefaultMatchesForced cases also verify the three-mode
+// equivalence contract with trace lines stripped.
 TEST_F(Equivalence, Observability_FunctionalEvents) {
     auto baseBuild = topoBaseBuild("observability");
     ASSERT_EQ(baseBuild.exitCode, 0) << "Topo-base build failed:\n" << baseBuild.output;
     auto baseRun = runBinary("observability", "observability_base");
     ASSERT_EQ(baseRun.exitCode, 0) << "Topo-base run failed:\n" << baseRun.output;
-
-    static const std::regex resultRe(R"(RESULT_US_FRIENDLY=(\d+\.?\d*))");
-    auto extractUs = [](const std::string& output) -> double {
-        std::smatch m;
-        if (std::regex_search(output, m, resultRe)) return std::stod(m[1].str());
-        return -1.0;
-    };
-    double baseUs = extractUs(baseRun.output);
 
     {
         std::error_code ec;
@@ -1313,15 +1303,13 @@ TEST_F(Equivalence, Observability_FunctionalEvents) {
     ASSERT_EQ(autoBuild.exitCode, 0) << "Topo-auto build failed:\n" << autoBuild.output;
     auto autoRun = runBinary("observability", "observability");
     ASSERT_EQ(autoRun.exitCode, 0) << "Topo-auto run failed:\n" << autoRun.output;
-    double autoUs = extractUs(autoRun.output);
 
     // 1. Pass-fired marker — auto build must have recorded the IR marker;
     //    base (observability=off) must not. The symbol-presence shape that
     //    lived here previously was unreliable: the runtime TU that defines
     //    `topo_trace_init` also defines `topo_trace_span_begin`, so the
     //    static archive pulls both into every binary that uses the init
-    //    API — regardless of whether ObservabilityPass ran. See the issue
-    //    referenced in the test header for details.
+    //    API — regardless of whether ObservabilityPass ran.
     assertPassFired("observability", "observability", "ObservabilityPass");
     assertPassNotFired("observability", "observability_base", "ObservabilityPass");
 
@@ -1338,15 +1326,9 @@ TEST_F(Equivalence, Observability_FunctionalEvents) {
     EXPECT_GT(events, 0) << "observability: auto binary emitted zero span events — "
                          << "tracing instrumentation is inert.";
 
-    // 3. Overhead upper bound (relaxed — see comment above).
-    if (baseUs > 0 && autoUs > 0 && baseUs >= 20000.0) {
-        double ratio = autoUs / baseUs;
-        EXPECT_LE(ratio, 1.25)
-            << "observability: auto/base overhead " << ratio
-            << " exceeds 1.25 upper bound (base=" << baseUs
-            << "us, auto=" << autoUs << "us)";
-        std::printf("[  INFO  ] observability/Observe: overhead auto/base = %.3f\n", ratio);
-    }
+    // 3. Functional output is independent of the duration of either run.
+    EXPECT_EQ(stripObservabilityNoise(stripTimingLines(baseRun.output)),
+              stripObservabilityNoise(stripTimingLines(autoRun.output)));
 
     std::printf("[  INFO  ] observability/Observe: events=%d\n", events);
 }

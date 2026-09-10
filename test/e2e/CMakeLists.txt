@@ -10,8 +10,9 @@ if(NOT TARGET ${TOPO_BUILD_TARGET})
         "ensure find_package(topo-cli CONFIG) at top level succeeded.")
 endif()
 
-add_library(E2eHarnessLlvm OBJECT E2eHarness.cpp)
+add_library(E2eHarnessLlvm OBJECT E2eHarness.cpp ObservabilityBenchmark.cpp)
 target_link_libraries(E2eHarnessLlvm PUBLIC topo::core::TopoPlatform GTest::gtest_main)
+target_link_libraries(E2eHarnessLlvm PRIVATE nlohmann_json::nlohmann_json)
 target_include_directories(E2eHarnessLlvm PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}
 )
@@ -88,6 +89,12 @@ target_link_libraries(topo-e2e-perf PRIVATE E2eHarnessLlvm)
 # --- B4: Per-Pass Benchmarks ---
 add_executable(topo-e2e-pass-bench PassBenchmarkTests.cpp)
 target_link_libraries(topo-e2e-pass-bench PRIVATE E2eHarnessLlvm)
+
+# Deterministic classification/reporting checks run in daily e2e CI; they
+# perform no timed workloads and need no benchmark fixture or measurement lock.
+add_executable(topo-e2e-observability-benchmark-tests ObservabilityBenchmarkTests.cpp)
+target_link_libraries(topo-e2e-observability-benchmark-tests PRIVATE
+    E2eHarnessLlvm nlohmann_json::nlohmann_json)
 
 # --- ThreadSanitizer backstop ---
 #
@@ -184,6 +191,8 @@ set_property(TARGET topo-e2e-decompile PROPERTY JOB_POOL_LINK llvm_link)
 # default (label "perf") and decompile is short (~6s); both still share
 # the global topo_e2e_build lock with everyone except split entries.
 include(GoogleTest)
+gtest_discover_tests(topo-e2e-observability-benchmark-tests
+    PROPERTIES LABELS "e2e" TIMEOUT 30)
 # Resolve the shared e2e cmake helper from THIS package's own cmake/ dir.
 # Use PROJECT_SOURCE_DIR (the topo-llvm project root — topo-llvm calls
 # project()), NOT CMAKE_SOURCE_DIR: when topo-llvm is configured as a

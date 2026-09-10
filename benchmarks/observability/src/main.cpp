@@ -1,8 +1,8 @@
 // Benchmark: ObservabilityPass — tracing span instrumentation overhead.
 //
-// Friendly:   tracing enabled, measuring overhead vs no-tracing baseline.
-//             (this IS the overhead — threshold allows 10% regression)
-// Unfriendly: same workload — both measure pure overhead cost.
+// The correctness run emits events with tracing active. Both timed workloads
+// run after shutdown and measure residual inserted calls/state checks against
+// a pass-disabled baseline. The dedicated performance test owns the threshold.
 
 #include <topo/rt/observe_rt.h>
 #include <algorithm>
@@ -92,7 +92,7 @@ int main() {
     // Benchmarks run WITHOUT active tracing to measure just the
     // instrumentation overhead inserted by ObservabilityPass.
     // The Pass inserts span_begin/end calls; with tracing shutdown,
-    // these are no-ops but still have call overhead.
+    // these return after runtime state checks and still have call overhead.
 
     // Warmup
     for (int i = 0; i < WARMUP; ++i)
