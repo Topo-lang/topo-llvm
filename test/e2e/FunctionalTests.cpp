@@ -3,8 +3,12 @@
 #include "topo/Platform/Platform.h"
 #include "topo/Platform/Process.h"
 
+#include <algorithm>
 #include <cstdlib>
 #include <fstream>
+#include <sstream>
+
+#include <nlohmann/json.hpp>
 
 namespace topo::test::e2e {
 
@@ -13,6 +17,34 @@ namespace topo::test::e2e {
 // ============================================================================
 
 using Functional = E2eFixture;
+
+// Feature correctness uses forced variants where defaults would benchmark
+// competing implementations. AutoSelection tests preserve the default path.
+
+// Forced adaptive/lifetime passes emit structured events before or between
+// result lines. Validate those records and compare the unchanged application
+// output. Equivalence's forced cases separately require event emission.
+static std::string applicationOutput(const std::string& output,
+                                     const std::vector<std::string>& allowedPasses) {
+    std::istringstream lines(output);
+    std::string line;
+    std::string result;
+    while (std::getline(lines, line)) {
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        if (line.rfind("{\"kind\":\"pass_event\",", 0) == 0) {
+            auto event = nlohmann::json::parse(line, nullptr, false);
+            if (event.is_object() && event.contains("pass") && event["pass"].is_string()) {
+                const auto pass = event["pass"].get<std::string>();
+                if (std::find(allowedPasses.begin(), allowedPasses.end(), pass) != allowedPasses.end()) {
+                    continue;
+                }
+            }
+            ADD_FAILURE() << "Malformed or unexpected pass event: " << line;
+        }
+        result += line + '\n';
+    }
+    return result;
+}
 
 // --- 01: Visibility ---
 
@@ -203,10 +235,10 @@ TEST_F(Functional, AuxiliaryTypes) {
 // --- 10: ParallelRuntime ---
 
 TEST_F(Functional, ParallelRuntime) {
-    auto build = topoBuild("parallel");
+    auto build = topoForcedBuild("parallel");
     ASSERT_EQ(build.exitCode, 0) << "topo-build failed:\n" << build.output;
 
-    auto run = runBinary("parallel", "parallel_runtime");
+    auto run = runBinary("parallel", "parallel_forced");
     ASSERT_EQ(run.exitCode, 0) << "Binary failed:\n" << run.output;
 
     assertOutputMatches(run.output,
@@ -235,13 +267,13 @@ TEST_F(Functional, IREmbedding) {
 // --- 14: AdaptiveParallel ---
 
 TEST_F(Functional, AdaptiveParallel) {
-    auto build = topoBuild("adaptive");
+    auto build = topoForcedBuild("adaptive");
     ASSERT_EQ(build.exitCode, 0) << "topo-build failed:\n" << build.output;
 
-    auto run = runBinary("adaptive", "adaptive_parallel");
+    auto run = runBinary("adaptive", "adaptive_forced");
     ASSERT_EQ(run.exitCode, 0) << "Binary failed:\n" << run.output;
 
-    assertOutputMatches(run.output,
+    assertOutputMatches(applicationOutput(run.output, {"TopoParallelPass", "AdaptiveDispatchPass"}),
                         // Scenario 1+2: Basic adaptive optimization
                         "=== Running pipeline with adaptive optimization ===\n"
                         "  result: {{NUM}}, specializations: {{NUM}}\n"
@@ -286,28 +318,20 @@ TEST_F(Functional, RustBasic) {
     projectsDir_ = fixturesDir_;
 
     auto build = topoBuild("rust_basic");
-    if (!build.spawned) {
-        // Spawn failure (missing fixture dir, missing topo-build) is a HARD
-        // failure — a skip here would silently drop the fixture coverage
-        // (issue e2e-harness-spawn-failure-masks-as-pass-or-skip).
-        FAIL() << "topo-build could not be spawned for rust_basic — fixture or "
-                  "toolchain missing (not a skip-worthy toolchain limitation)";
-    } else if (build.exitCode != 0) {
-        GTEST_SKIP() << "Rust build failed (toolchain may be incomplete): exit code "
-                      + std::to_string(build.exitCode);
-    }
-    // lib crate — no binary to run, just verify build succeeds
-
     projectsDir_ = savedProjects;
+    ASSERT_TRUE(build.spawned) << "topo-build could not be spawned for rust_basic:\n" << build.output;
+    ASSERT_EQ(build.exitCode, 0) << "Rust build failed with an available cargo toolchain:\n"
+                                 << build.output;
+    // lib crate — no binary to run, just verify build succeeds
 }
 
 // --- 16: Ownership ---
 
 TEST_F(Functional, Ownership) {
-    auto build = topoBuild("ownership");
+    auto build = topoForcedBuild("ownership");
     ASSERT_EQ(build.exitCode, 0) << "topo-build failed:\n" << build.output;
 
-    auto run = runBinary("ownership", "ownership");
+    auto run = runBinary("ownership", "ownership_forced");
     ASSERT_EQ(run.exitCode, 0) << "Binary failed:\n" << run.output;
 
     assertOutputMatches(run.output,
@@ -586,10 +610,10 @@ TEST_F(Functional, IncrementalBuild_CorruptedManifest) {
 // --- 23: Indirection ---
 
 TEST_F(Functional, Indirection) {
-    auto build = topoBuild("indirection");
+    auto build = topoForcedBuild("indirection");
     ASSERT_EQ(build.exitCode, 0) << "topo-build failed:\n" << build.output;
 
-    auto run = runBinary("indirection", "indirection");
+    auto run = runBinary("indirection", "indirection_forced");
     ASSERT_EQ(run.exitCode, 0) << "Binary failed:\n" << run.output;
 
     // Correctness lines still present; benchmark results follow
@@ -602,10 +626,10 @@ TEST_F(Functional, Indirection) {
 // --- 24: LoopParallel ---
 
 TEST_F(Functional, LoopParallel) {
-    auto build = topoBuild("loop_parallel");
+    auto build = topoForcedBuild("loop_parallel");
     ASSERT_EQ(build.exitCode, 0) << "topo-build failed:\n" << build.output;
 
-    auto run = runBinary("loop_parallel", "loop_parallel");
+    auto run = runBinary("loop_parallel", "loop_parallel_forced");
     ASSERT_EQ(run.exitCode, 0) << "Binary failed:\n" << run.output;
 
     assertOutputMatches(run.output,
@@ -617,14 +641,14 @@ TEST_F(Functional, LoopParallel) {
 // --- 25: LifetimeArena ---
 
 TEST_F(Functional, LifetimeArena) {
-    auto build = topoBuild("lifetime");
+    auto build = topoForcedBuild("lifetime");
     ASSERT_EQ(build.exitCode, 0) << "topo-build failed:\n" << build.output;
 
-    auto run = runBinary("lifetime", "lifetime_arena");
+    auto run = runBinary("lifetime", "lifetime_forced");
     ASSERT_EQ(run.exitCode, 0) << "Binary failed:\n" << run.output;
 
     // Correctness lines still present; benchmark results follow
-    assertOutputMatches(run.output,
+    assertOutputMatches(applicationOutput(run.output, {"LifetimeArenaPass"}),
                         "25_lifetime_arena: result=37745100\n"
                         "25_lifetime_arena: all assertions passed\n"
                         "...");
@@ -633,10 +657,10 @@ TEST_F(Functional, LifetimeArena) {
 // --- 26: Hints ---
 
 TEST_F(Functional, Hints) {
-    auto build = topoBuild("hints");
+    auto build = topoForcedBuild("hints");
     ASSERT_EQ(build.exitCode, 0) << "topo-build failed:\n" << build.output;
 
-    auto run = runBinary("hints", "hints");
+    auto run = runBinary("hints", "hints_forced");
     ASSERT_EQ(run.exitCode, 0) << "Binary failed:\n" << run.output;
 
     assertOutputMatches(run.output,
@@ -667,10 +691,10 @@ TEST_F(Functional, Observability) {
 // Project 29 merged into 22. Correctness covered by 22's output validation.
 
 TEST_F(Functional, DataLayout) {
-    auto build = topoBuild("data_layout");
+    auto build = topoForcedBuild("data_layout");
     ASSERT_EQ(build.exitCode, 0) << "topo-build failed:\n" << build.output;
 
-    auto run = runBinary("data_layout", "data_layout_perf");
+    auto run = runBinary("data_layout", "data_layout_forced");
     ASSERT_EQ(run.exitCode, 0) << "Binary failed:\n" << run.output;
 
     // 22 now outputs benchmark results; verify it completes successfully

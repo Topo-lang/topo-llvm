@@ -223,6 +223,7 @@ topo_inject_e2e_project_locks(
 )
 
 gtest_discover_tests(topo-e2e-equivalence DISCOVERY_TIMEOUT 30
+    TEST_FILTER "Equivalence.*"
     PROPERTIES
         LABELS "e2e\;equivalence"
         TIMEOUT 300
@@ -232,6 +233,26 @@ topo_inject_e2e_project_locks(
     FIXTURE Equivalence
     PREFIX topo_e2e_llvm
     LABELS "e2e;equivalence"
+    BUILD_CALLS topoBuild topoBaseBuild topoForcedBuild vanillaBuild
+                assertPassFired assertPassNotFired
+    ASSERT_CALLS assertBaseEquivalence assertForcedEquivalence assertDefaultEquivalence
+                 assertBaseVsDefaultEquivalence assertBaseVsForcedEquivalence
+)
+
+# Product auto selection measures alternatives at build time. Its semantic
+# checks are explicit and remain separate from both daily correctness and
+# performance-ratio tests. Per-project locks are shared with daily cases.
+gtest_discover_tests(topo-e2e-equivalence DISCOVERY_TIMEOUT 30
+    TEST_FILTER "AutoSelection.*"
+    PROPERTIES
+        LABELS "e2e\;equivalence\;auto_selection"
+        TIMEOUT 300
+)
+topo_inject_e2e_project_locks(
+    SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/EquivalenceTests.cpp"
+    FIXTURE AutoSelection
+    PREFIX topo_e2e_llvm
+    LABELS "e2e;equivalence;auto_selection"
     BUILD_CALLS topoBuild topoBaseBuild topoForcedBuild vanillaBuild
                 assertPassFired assertPassNotFired
     ASSERT_CALLS assertBaseEquivalence assertForcedEquivalence assertDefaultEquivalence

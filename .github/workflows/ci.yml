@@ -5,12 +5,13 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
-  # Nightly deterministic e2e gate. 18:03 UTC — staggered off topo-jvm's :43
-  # and the meta's :23. The benchmark + e2e (linux) job runs the deterministic
-  # equivalence + pass-fired suite (timing benches stay manual / workflow_dispatch
-  # only — they are 40-90 min and flaky on shared runners), so the nightly is
-  # bounded and not subject to timing-suite hangs. Scheduled runs only ever use
-  # the workflow file on the default branch.
+    inputs:
+      validate_auto:
+        description: 'Validate auto-selection correctness and benchmark artifact builds (runs internal sampling)'
+        type: boolean
+        default: false
+  # Daily correctness checks use base/forced modes. Product auto-selection
+  # performs internal sampling and has a separate, explicit manual entry.
   schedule:
     - cron: '3 18 * * *'
 
@@ -300,34 +301,12 @@ jobs:
           cmake --build build
           ./build/smoke
 
-  # ── Benchmark + e2e gate (schedule + manual only) ──────
-  # The 41 LLVM-IR pass benchmarks + the IR/output-equivalence suite. Gated
-  # to schedule / workflow_dispatch so it never adds its tens of minutes to a
-  # PR. Heavier bootstrap than build-and-test: the e2e artifacts are built by
-  # topo-cli's `topo-build`, and TOPO_LLVM_BUILD_TOOLS (topo-build-llvm-mixed)
-  # reverse-links topo-lang-cpp / -rust's LLVM scope — the cpp/rust↔llvm
-  # gating loop. We break it the way the bootstrap order prescribes
-  # (llvm core → lang-cpp/-rust with ENABLE_LLVM → llvm tools):
-  #   1. topo-core + topo-lang + topo-lang-cpp at DEFAULT scope (the runtime
-  #      headers topo-llvm's C-ABI libs include; all LLVM-independent).
-  #   2. topo-llvm CORE from THIS checkout → install, so lang-cpp/-rust's
-  #      find_package(topo-llvm) resolves.
-  #   3. lang-cpp + lang-rust with ENABLE_LLVM=ON, then topo-cli.
-  #   4. reconfigure the same checkout with TOOLS + BENCHMARKS ON and run.
-  # Built fresh every run (no upstream cache) so the LLVM-dependent layer can
-  # never link a stale topo-llvm. All three platforms run functional,
-  # equivalence and pass-fired checks; perf/benchmark labels are excluded.
-  # Dedicated local/manual performance runs retain timing measurements and
-  # their category contracts separately from this functional CI gate.
+  # Functional correctness, equivalence and pass-fired checks on all platforms.
+  # Bootstrap the cpp/rust <-> llvm dependency gates in order: core LLVM,
+  # language backends, CLI, then LLVM tools. Auto-selection correctness and
+  # artifact prebuilds are opt-in because they execute internal sampling.
   benchmark:
-    # The deterministic e2e (functional + equivalence + pass-fired) now gates
-    # push + PR too — not just schedule/dispatch. This job runs ONLY the
-    # deterministic labels (Test step: ctest -L e2e --label-exclude
-    # "perf|benchmark"); the wall-clock TIMING benches stay manual/local (see
-    # that step's comment), so the PR gate never pays the 40-90 min timing cost.
-    # No `if:` → runs on every workflow trigger (push to main, PR, dispatch,
-    # and the nightly schedule once added).
-    name: benchmark + e2e (${{ matrix.os }})
+    name: functional + equivalence (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     defaults:
       run:
@@ -350,6 +329,9 @@ jobs:
       # TOPO_LANG_CPP_REF — see the comment on the workflow env block.
       TOPO_LANG_RUST_REF: main
       TOPO_CLI_REF: main
+      # Rust 1.98 emits LLVM 22 bitcode, matching this repo's LLVM 22 reader.
+      # Upgrade both together after validating the backend on all platforms.
+      RUSTUP_TOOLCHAIN: '1.98.0'
     steps:
       - uses: actions/checkout@v5
       # ninja + clangd are required. libpython3.11 is also required: the
@@ -430,9 +412,15 @@ jobs:
           echo "CXX=${{ github.workspace }}/llvm-dev/bin/clang++.exe" >> "$GITHUB_ENV"
           echo "TOPO_WIN_CMAKE=-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded" >> "$GITHUB_ENV"
 
-      # rustup ships on the runner image; ensure a default toolchain for the
-      # topo-lang-rust LLVM scope + Rust benchmark variants.
-      - run: rustup show >/dev/null 2>&1 || rustup default stable
+      - name: Install compatible Rust and verify real bitcode
+        run: |
+          rustup toolchain install "${RUSTUP_TOOLCHAIN}" --profile minimal --no-self-update
+          if [ "${RUNNER_OS}" = "macOS" ]; then
+            LLVM_BIN="$(brew --prefix llvm@22)/bin"
+          else
+            LLVM_BIN="${{ github.workspace }}/llvm-dev/bin"
+          fi
+          sh .github/scripts/verify-rust-llvm.sh "${LLVM_BIN}"
 
       - name: Build & install topo-core (zero-LLVM, lang-less)
         run: |
@@ -769,14 +757,10 @@ jobs:
              build/tools/topo-build-llvm-mixed/topo-build-llvm-mixed${ext} \
              "${RUNNER_TEMP}/topo-install/bin/"
 
-      # Standalone smoke for the `topo_bench_artifacts` FIXTURES_SETUP
-      # provider: running the provider test by name proves it is registered in
-      # a standalone configure AND that the bench prebuild pipeline works
-      # end-to-end here. Linux + nightly/dispatch only — the prebuild compiles
-      # every registered benchmark variant (tens of minutes), which must never
-      # gate a PR (see the job comment above).
+      # The provider builds base/auto/forced variants, so it also runs the
+      # product's internal auto-selection sampler. Keep it in the manual lane.
       - name: Bench-artifacts fixture provider (standalone smoke)
-        if: matrix.os == 'ubuntu-24.04' && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+        if: matrix.os == 'ubuntu-24.04' && github.event_name == 'workflow_dispatch' && inputs.validate_auto
         run: |
           # Same PATH defence-in-depth as the Test step: bundled llvm-dev/bin
           # (clang-22) ahead of the runner's system clang. --no-tests=error:
@@ -785,33 +769,9 @@ jobs:
           export PATH="${{ github.workspace }}/llvm-dev/bin:${PATH}"
           ctest --test-dir build -R '^topo_bench_artifacts_build$' --no-tests=error --output-on-failure
 
-      # Deterministic gate: e2e functional + equivalence + pass-fired, with the
-      # wall-clock TIMING benches EXCLUDED (--label-exclude "perf|benchmark").
-      # The timing suite serializes via the topo_bench_measure resource lock and
-      # runs 10 interleaved rounds per case → 40-90 min and prone to hangs on a
-      # shared runner (not a reliable regression signal there), so it is NOT a
-      # CI gate. Run it manually instead:
-      #   ctest --test-dir build -L benchmark   # measure — the topo_bench_artifacts
-      #   fixture provider pre-builds the variants first; a manual
-      #   `cmake --build build --target topo-bench-artifacts` stays optional
-      # Equivalence builds its variants on-demand (no pre-build needed here) and
-      # proves each pass fires AND preserves behavior (timing stripped).
-      # No stdlib-header shim: the benchmark Topo.toml files reference the
-      # topo-lang-cpp runtime headers via a META-layout-relative path
-      # (<bench>/../../../topo-lang-cpp/runtime/include) that is absent in the
-      # standalone/installed layout. The equivalence harness's vanilla compile
-      # now injects the install-prefix include — baked in from find_path as the
-      # TOPO_LANG_CPP_RUNTIME_INCLUDE define — so <topo/*.h> resolves without a
-      # symlink shim. See test/e2e/E2eHarness.cpp::appendStdlibPrefixInclude.
-      # Put the bundled llvm-dev/bin (clang-22, the SAME LLVM linked into the
-      # backend tools) ahead of the runner's system clang-18 on PATH. The
-      # backend tools now resolve their own bundled clang directly (the
-      # resolveBundledClangxx fix), so this is defence-in-depth: it guarantees
-      # the IR producer and the link-step reader share a major version even if
-      # a build path ever falls back to a bare `clang++` lookup. Without it the
-      # link reads LLVM-22 IR with system clang-18 → `Unknown attribute kind` /
-      # `linking failed`.
-      - name: Test (e2e equivalence + pass-fired; timing excluded)
+      # Timing thresholds and internal auto-selection sampling have separate
+      # entry points. Force/base tests retain semantics and pass-fired checks.
+      - name: Test (functional + equivalence; sampling excluded)
         run: |
           # Put the IR producer's clang ahead on PATH (defence-in-depth): brew
           # llvm@22 on macOS, the bundled llvm-dev/bin (clang-22) elsewhere.
@@ -820,4 +780,18 @@ jobs:
           else
             export PATH="${{ github.workspace }}/llvm-dev/bin:${PATH}"
           fi
-          ctest --test-dir build -L e2e --label-exclude "perf|benchmark" --output-on-failure --timeout 300
+          ctest --test-dir build --show-only=json-v1 > e2e-registered.json
+          ctest --test-dir build --show-only=json-v1 -L e2e --label-exclude "perf|benchmark|auto_selection" > e2e-daily.json
+          ctest --test-dir build --show-only=json-v1 -L auto_selection > e2e-auto.json
+          python3 .github/scripts/verify-e2e-selection.py e2e-registered.json e2e-daily.json e2e-auto.json
+          ctest --test-dir build -L e2e --label-exclude "perf|benchmark|auto_selection" --output-on-failure --timeout 300 --no-tests=error
+
+      - name: Test (auto-selection correctness; manual)
+        if: github.event_name == 'workflow_dispatch' && inputs.validate_auto
+        run: |
+          if [ "${RUNNER_OS}" = "macOS" ]; then
+            export PATH="$(brew --prefix llvm@22)/bin:${PATH}"
+          else
+            export PATH="${{ github.workspace }}/llvm-dev/bin:${PATH}"
+          fi
+          ctest --test-dir build -L auto_selection --output-on-failure --timeout 300 --no-tests=error

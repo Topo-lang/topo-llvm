@@ -27,8 +27,8 @@ public:
     /// 3. Return winner (variant must be >10% faster to win)
     /// Returns nullopt on cross-compilation or compilation failure.
     ///
-    /// optLevel: LLVM optimization level to apply before compilation (default O0 = no opt).
-    /// Use O2 for passes that only add metadata (e.g., LoopParallelizePass).
+    /// optLevel: LLVM optimization level to apply before compilation (default O2).
+    /// O2 also enables metadata-only variants (e.g., LoopParallelizePass) to take effect.
     static std::optional<BenchmarkResult> run(llvm::Module& baseModule,
                                               llvm::StringRef targetFuncName,
                                               std::function<void(llvm::Module&)> applyVariant,

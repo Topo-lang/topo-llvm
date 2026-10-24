@@ -56,6 +56,9 @@ struct EnableQuickBenchIters {
 // ============================================================================
 
 using Equivalence = E2eFixture;
+// Default configurations below can benchmark candidate implementations.
+// These cases remain correctness gates in the explicit auto-selection lane.
+using AutoSelection = E2eFixture;
 
 // Strip timing-dependent lines from benchmark output.
 //
@@ -602,7 +605,7 @@ TEST_F(Equivalence, ClassTemplate_ForcedMatchesVanilla) {
 
 // --- DataLayoutPass → data_layout ---
 
-TEST_F(Equivalence, DataLayoutPass_DefaultMatchesVanilla) {
+TEST_F(AutoSelection, DataLayoutPass_DefaultMatchesVanilla) {
     assertDefaultEquivalence(this, "data_layout", "data_layout_perf");
 }
 TEST_F(Equivalence, DataLayoutPass_BaseMatchesVanilla) {
@@ -621,7 +624,7 @@ TEST_F(Equivalence, DataLayoutPass_ForcedMatchesVanilla) {
 
 // --- IndirectionPass → indirection ---
 
-TEST_F(Equivalence, IndirectionPass_DefaultMatchesVanilla) {
+TEST_F(AutoSelection, IndirectionPass_DefaultMatchesVanilla) {
     assertDefaultEquivalence(this, "indirection", "indirection");
 }
 TEST_F(Equivalence, IndirectionPass_BaseMatchesVanilla) {
@@ -631,9 +634,15 @@ TEST_F(Equivalence, IndirectionPass_ForcedMatchesVanilla) {
     assertForcedEquivalence(this, "indirection", "indirection_forced");
 }
 
+// Ownership's functional check uses its forced fixture in daily CI. Keep
+// the default auto-selection behavior observable in the explicit lane.
+TEST_F(AutoSelection, Ownership_DefaultMatchesVanilla) {
+    assertDefaultEquivalence(this, "ownership", "ownership");
+}
+
 // --- LoopParallelizePass → loop_parallel ---
 
-TEST_F(Equivalence, LoopParallelizePass_DefaultMatchesVanilla) {
+TEST_F(AutoSelection, LoopParallelizePass_DefaultMatchesVanilla) {
     assertDefaultEquivalence(this, "loop_parallel", "loop_parallel");
 }
 TEST_F(Equivalence, LoopParallelizePass_BaseMatchesVanilla) {
@@ -671,7 +680,7 @@ TEST_F(Equivalence, LoopReductionCombine_ForcedMatchesVanilla) {
 // PrefetchPass bugs were fixed 2026-04-18, and the workload was
 // reclassified from W to C for insufficient signal strength.)
 
-TEST_F(Equivalence, PrefetchPass_DefaultMatchesVanilla) {
+TEST_F(AutoSelection, PrefetchPass_DefaultMatchesVanilla) {
     assertDefaultEquivalence(this, "hints", "hints");
     assertPassFired("hints", "hints", "PrefetchPass");
 }
@@ -759,7 +768,7 @@ TEST_F(Equivalence, PrefetchPass_ForcedMatchesVanilla) {
 // keeping the strip-vs-emission anti-masking contract symmetric with the
 // pipeline/forced guard above.
 
-TEST_F(Equivalence, TopoParallelPass_BaseMatchesDefault) {
+TEST_F(AutoSelection, TopoParallelPass_BaseMatchesDefault) {
     assertBaseVsDefaultEquivalence(this, "parallel", "parallel_base", "parallel_runtime");
     // Base has parallel=off: pass must not fire.
     assertPassNotFired("parallel", "parallel_base", "TopoParallelPass");
@@ -779,7 +788,7 @@ TEST_F(Equivalence, TopoParallelPass_BaseMatchesForced) {
         << "Forced parallel (runtime-API workload, no pipeline candidates) "
            "must not emit any TopoParallelPass pass-event";
 }
-TEST_F(Equivalence, TopoParallelPass_DefaultMatchesForced) {
+TEST_F(AutoSelection, TopoParallelPass_DefaultMatchesForced) {
     auto def = topoBuild("parallel");
     ASSERT_EQ(def.exitCode, 0) << def.output;
     auto defRun = runBinary("parallel", "parallel_runtime");
@@ -817,7 +826,7 @@ TEST_F(Equivalence, TopoParallelPass_DefaultMatchesForced) {
 // so other tests still fail loudly on an unexpected pass-event). The
 // `adaptive_base` (parallel off) side must emit zero pass-events.
 
-TEST_F(Equivalence, AdaptiveDispatchPass_BaseMatchesDefault) {
+TEST_F(AutoSelection, AdaptiveDispatchPass_BaseMatchesDefault) {
     assertBaseVsDefaultEquivalence(this, "adaptive", "adaptive_base", "adaptive_parallel");
 }
 TEST_F(Equivalence, AdaptiveDispatchPass_BaseMatchesForced) {
@@ -849,7 +858,7 @@ TEST_F(Equivalence, AdaptiveDispatchPass_BaseMatchesForced) {
     EXPECT_EQ(countPassEventLines(baseRun.output), 0u)
         << "Base adaptive (parallel off) must not emit any pass-event";
 }
-TEST_F(Equivalence, AdaptiveDispatchPass_DefaultMatchesForced) {
+TEST_F(AutoSelection, AdaptiveDispatchPass_DefaultMatchesForced) {
     auto def = topoBuild("adaptive");
     ASSERT_EQ(def.exitCode, 0) << def.output;
     auto defRun = runBinary("adaptive", "adaptive_parallel");
@@ -1021,7 +1030,7 @@ TEST_F(Equivalence, ObservabilityPass_DefaultMatchesForced) {
 // this file, so the TopoParallelPass pipeline/forced guard above can
 // reuse the same helpers.
 
-TEST_F(Equivalence, LifetimeArenaPass_BaseMatchesDefault) {
+TEST_F(AutoSelection, LifetimeArenaPass_BaseMatchesDefault) {
     // Base (pass off): no arena substitution, no pass-events.
     auto base = topoBaseBuild("lifetime");
     ASSERT_EQ(base.exitCode, 0) << base.output;
@@ -1071,7 +1080,7 @@ TEST_F(Equivalence, LifetimeArenaPass_BaseMatchesForced) {
     assertPassFired("lifetime", "lifetime_forced", "LifetimeArenaPass");
     assertPassNotFired("lifetime", "lifetime_base", "LifetimeArenaPass");
 }
-TEST_F(Equivalence, LifetimeArenaPass_DefaultMatchesForced) {
+TEST_F(AutoSelection, LifetimeArenaPass_DefaultMatchesForced) {
     auto def = topoBuild("lifetime");
     ASSERT_EQ(def.exitCode, 0) << def.output;
     auto defRun = runBinary("lifetime", "lifetime_arena");
@@ -1221,7 +1230,7 @@ TEST_F(Equivalence, JIT_IREmbed_FunctionalSymbol) {
 // and wraps the AOT path with `topo_cost_begin`/`topo_cost_end` calls, and
 // registers every pipeline via `topo_adaptive_register` at ctor time.
 //
-// Functional assertion: Topo auto binary must link against the runtime
+// Functional assertion: Topo forced binary must link against the runtime
 // symbols `topo_cost_begin` / `topo_adaptive_register`; Topo base must not.
 TEST_F(Equivalence, Adaptive_FunctionalDispatch) {
     auto baseBuild = topoBaseBuild("adaptive");
@@ -1234,17 +1243,17 @@ TEST_F(Equivalence, Adaptive_FunctionalDispatch) {
         fs::remove_all(projectsDir_ / "adaptive" / ".topo-cache", ec);
     }
 
-    auto autoBuild = topoBuild("adaptive");
-    ASSERT_EQ(autoBuild.exitCode, 0) << "Topo-auto build failed:\n" << autoBuild.output;
-    auto autoRun = runBinary("adaptive", "adaptive_parallel");
-    EXPECT_EQ(autoRun.exitCode, 0) << "Topo-auto run failed:\n" << autoRun.output;
+    auto forcedBuild = topoForcedBuild("adaptive");
+    ASSERT_EQ(forcedBuild.exitCode, 0) << "Topo-forced build failed:\n" << forcedBuild.output;
+    auto forcedRun = runBinary("adaptive", "adaptive_forced");
+    EXPECT_EQ(forcedRun.exitCode, 0) << "Topo-forced run failed:\n" << forcedRun.output;
 
-    // Topo auto must reference the AdaptiveDispatchPass runtime calls.
-    bool autoHasCostBegin = binaryHasSymbol(this, "adaptive", "adaptive_parallel", "topo_cost_begin");
-    bool autoHasRegister = binaryHasSymbol(this, "adaptive", "adaptive_parallel", "topo_adaptive_register");
-    EXPECT_TRUE(autoHasCostBegin) << "adaptive: auto binary missing `topo_cost_begin` — "
+    // Topo forced must reference the AdaptiveDispatchPass runtime calls.
+    bool forcedHasCostBegin = binaryHasSymbol(this, "adaptive", "adaptive_forced", "topo_cost_begin");
+    bool forcedHasRegister = binaryHasSymbol(this, "adaptive", "adaptive_forced", "topo_adaptive_register");
+    EXPECT_TRUE(forcedHasCostBegin) << "adaptive: forced binary missing `topo_cost_begin` — "
                                   << "AdaptiveDispatchPass did not insert cost instrumentation.";
-    EXPECT_TRUE(autoHasRegister) << "adaptive: auto binary missing `topo_adaptive_register` — "
+    EXPECT_TRUE(forcedHasRegister) << "adaptive: forced binary missing `topo_adaptive_register` — "
                                  << "AdaptiveDispatchPass did not register pipelines.";
 
     // Topo base (adaptive=off) should not reference the dispatch runtime at
@@ -1256,9 +1265,9 @@ TEST_F(Equivalence, Adaptive_FunctionalDispatch) {
     EXPECT_FALSE(baseHasRegister) << "adaptive: base binary contains `topo_adaptive_register` "
                                   << "despite adaptive=off.";
 
-    std::printf("[  INFO  ] adaptive/AdaptiveDispatch: auto has {cost_begin=%d, register=%d}, "
+    std::printf("[  INFO  ] adaptive/AdaptiveDispatch: forced has {cost_begin=%d, register=%d}, "
                 "base has {cost_begin=%d, register=%d}\n",
-                autoHasCostBegin, autoHasRegister, baseHasCostBegin, baseHasRegister);
+                forcedHasCostBegin, forcedHasRegister, baseHasCostBegin, baseHasRegister);
 }
 
 // --- ObservabilityPass (28_observability) — functional artifact check ---
