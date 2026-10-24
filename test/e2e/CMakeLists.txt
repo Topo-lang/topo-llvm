@@ -71,7 +71,8 @@ set(_e2e_runtime_deps
 
 # --- B1: Functional ---
 add_executable(topo-e2e-functional FunctionalTests.cpp)
-target_link_libraries(topo-e2e-functional PRIVATE E2eHarnessLlvm)
+target_link_libraries(topo-e2e-functional PRIVATE
+    E2eHarnessLlvm nlohmann_json::nlohmann_json)
 add_dependencies(topo-e2e-functional ${_e2e_runtime_deps})
 
 # --- B2: Equivalence ---
