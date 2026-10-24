@@ -11,13 +11,13 @@
 #
 # Step 2 — Cellar rpath canonicalization: CMAKE_INSTALL_RPATH_USE_LINK_PATH
 # appends the build host's LLVM lib dir as a dev fallback. With a Homebrew
-# LLVM that dir is the VERSIONED Cellar keg (…/Cellar/llvm/22.1.7/lib), which
+# LLVM/LLDB that dir is the VERSIONED Cellar keg (…/Cellar/llvm/22.1.7/lib), which
 # bakes an exact-patch string into the shipped artifact and dangles on the
 # build host after every `brew upgrade llvm` patch bump. Rewrite it to the
 # stable unversioned opt symlink (…/opt/llvm/lib): identical resolution on the
 # build host, no exact-version residue in the artifact. @loader_path entries
 # are untouched and keep their position (first). Idempotent — an artifact with
-# no versioned Cellar LLVM rpath is left unchanged, so non-Homebrew layouts
+# no versioned Cellar LLVM/LLDB rpath is left unchanged, so non-Homebrew layouts
 # are a no-op.
 #
 # macOS-only: ELF (Linux) already resolves the soname through the rpath, so no
@@ -108,9 +108,9 @@ endforeach()
 foreach(_rp IN LISTS _rpaths)
     # <brew-prefix>/Cellar/<formula>/<version>/<sub> → <brew-prefix>/opt/<formula>/<sub>
     # (Homebrew guarantees opt/<formula> symlinks to the active keg.)
-    # Restricted to LLVM-family kegs (llvm, llvm@NN) — the only dev fallback
+    # Restricted to LLVM-family kegs (llvm, llvm@NN, lldb) — the dev fallbacks
     # this helper owns; other rpaths are not its business.
-    if(_rp MATCHES "^(.+)/Cellar/(llvm[^/]*)/[^/]+/(.+)$")
+    if(_rp MATCHES "^(.+)/Cellar/(llvm[^/]*|lldb[^/]*)/[^/]+/(.+)$")
         set(_stable "${CMAKE_MATCH_1}/opt/${CMAKE_MATCH_2}/${CMAKE_MATCH_3}")
         if("${_stable}" IN_LIST _rpaths)
             # The stable form is already an rpath — just drop the versioned one
