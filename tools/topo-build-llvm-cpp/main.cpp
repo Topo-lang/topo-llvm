@@ -9,12 +9,14 @@
 
 #include "CppDriver.h"
 #include "NinjaGen.h"
+#include "IsolatedCppBuild.h"
 
 #include "topo/Basic/Diagnostic.h"
 #include "topo/Build/AutoLink.h"
 #include "topo/Backend/PassReportsSidecar.h"
 #include "topo/Build/BackendProtocol.h"
 #include "topo/Build/IncrementalCache.h"
+#include "topo/Build/ExecutionEvidence.h"
 #include "topo/Backend/LLVMTransformBackend.h"
 #include "topo/Platform/Platform.h"
 #include "topo/Platform/ToolResolution.h"
@@ -23,6 +25,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <memory>
 #include <sstream>
 
 namespace fs = std::filesystem;
@@ -84,6 +87,15 @@ static bool expectArrayOfStringsIfPresent(const nlohmann::json& extras, const ch
 }
 
 int main(int argc, char* argv[]) {
+    std::vector<std::string> evidenceModes{"commands"};
+#if defined(__APPLE__) && defined(__aarch64__)
+    evidenceModes.push_back("isolated-build");
+#endif
+    if(argc==2 && (std::string(argv[1])=="--evidence-capabilities" || std::string(argv[1])=="--capabilities")) {
+        std::cout<<nlohmann::json{{"evidence",{{"protocolVersion",1},{"modes",evidenceModes},{"checkModel",true}}}}.dump()<<"\n";
+        return 0;
+    }
+    const bool emitCheckModel=argc==5 && std::string(argv[1])=="--check-model" && std::string(argv[3])=="--output";
     if (argc < 2) {
         std::cerr << "Usage: " << argv[0] << " <request.json>\n"
                   << "  Backend tool invoked by topo-build. Not intended for direct use.\n";
@@ -91,7 +103,7 @@ int main(int argc, char* argv[]) {
     }
 
     // Read the JSON request file
-    std::string requestPath = argv[1];
+    std::string requestPath = argv[emitCheckModel?2:1];
     std::ifstream ifs(requestPath);
     if (!ifs) {
         std::cerr << "error: cannot open request file '" << requestPath << "'\n";
@@ -106,6 +118,10 @@ int main(int argc, char* argv[]) {
     if (!topo::build::deserializeBackendRequest(jsonStr, req)) {
         std::cerr << "error: failed to parse backend request JSON\n";
         return 1;
+    }
+    std::string evidenceError;
+    if(!topo::build::validateEvidenceCapability(req,evidenceModes,evidenceError)) {
+        std::cerr<<"error: "<<evidenceError<<"\n";return 1;
     }
 
     // Per-value validation of backendExtras inputs. Centralised unknown-key
@@ -137,23 +153,70 @@ int main(int argc, char* argv[]) {
     compileCfg.standard = standard;
     compileCfg.cppFlags = cppFlags;
     compileCfg.outputType = req.config.outputType;
+    compileCfg.optLevel = req.config.optLevel;
     compileCfg.embedIR = req.config.embedIR;
     compileCfg.adaptiveCfg = req.config.adaptiveCfg;
+    compileCfg.buildMode = req.config.buildMode;
     compileCfg.verbose = req.verbose;
+    compileCfg.evidenceMode=req.evidence.mode;
+    compileCfg.checkModelPath=req.checkModelPath;
+    compileCfg.checkModelSha256=req.checkModelSha256;
 
     fs::path tempDir(req.tempDir);
     std::vector<std::string> irFiles;
+
+    // The model and actual observed compilation both use direct per-TU
+    // commands. Existing unproved cache entries do not satisfy this request.
+    if(emitCheckModel || !req.checkModelPath.empty() || !req.evidence.mode.empty())req.noIncremental=true;
+    if(emitCheckModel) {
+        if(!topo::build::writeCppCheckModel(compileCfg,tempDir,argv[4],evidenceError)) {
+            std::cerr<<"error: "<<evidenceError<<"\n";return 1;
+        }
+        return 0;
+    }
+    if(req.evidence.mode=="isolated-build") {
+        auto isolatedCfg=compileCfg;
+        isolatedCfg.outputPath=req.outputPath;
+        isolatedCfg.linkDirs=req.linkDirs;isolatedCfg.linkLibs=req.linkLibs;
+        isolatedCfg.optLevel=req.config.optLevel;isolatedCfg.obfMode=req.config.obfMode;isolatedCfg.obfSalt=req.config.obfSalt;
+        isolatedCfg.parallelCfg=req.config.parallelCfg;isolatedCfg.dataLayoutCfg=req.config.dataLayoutCfg;
+        isolatedCfg.indirectionCfg=req.config.indirectionCfg;isolatedCfg.observabilityCfg=req.config.observabilityCfg;
+        isolatedCfg.lifetimeCfg=req.config.lifetimeCfg;isolatedCfg.loopParallelCfg=req.config.loopParallelCfg;
+        isolatedCfg.prefetchCfg=req.config.prefetchCfg;isolatedCfg.typeNarrowingCfg=req.config.typeNarrowingCfg;
+        isolatedCfg.containmentCfg=req.config.containmentCfg;isolatedCfg.pipelineCfg=req.config.pipelineCfg;
+        isolatedCfg.dumpIR=req.config.dumpIR;isolatedCfg.dumpMap=req.config.dumpMap;isolatedCfg.debugInternal=req.config.debugInternal;
+        isolatedCfg.evidenceOutput=req.evidence.manifestPath;isolatedCfg.evidenceCompilerSha256=req.evidence.compilerSha256;
+        isolatedCfg.evidenceLinkerPath=req.evidence.linkerPath;isolatedCfg.evidenceLinkerSha256=req.evidence.linkerSha256;
+        for(const auto& entry:req.visibilityEntries)if(entry.visibility!=topo::Visibility::Public) {
+            std::cerr<<"error: isolated-build supports only public C ABI declarations; visibility transforms require the normal backend\n";return 1;
+        }
+        std::cerr<<"[isolated-build] Compiling restricted C ABI source with explicit platform trust assumptions\n";
+        auto result=topo::build::buildIsolatedCpp(isolatedCfg,evidenceError);
+        if(result.exitCode!=0)std::cerr<<"error: "<<evidenceError<<"\n";
+        return result.exitCode;
+    }
+
+    std::unique_ptr<topo::build::evidence::ExecutionRecorder> recorder;
+    if(req.evidence.mode=="commands") {
+        topo::build::evidence::RootMap roots{{"project",fs::current_path()},{"temporary",tempDir},
+            {"artifact",fs::absolute(req.outputPath).parent_path()}};
+        recorder=std::make_unique<topo::build::evidence::ExecutionRecorder>(roots,req.evidence.manifestPath,"topo-build-llvm-cpp");
+    }
+    struct EvidenceFlush {
+        topo::build::evidence::ExecutionRecorder* recorder;
+        ~EvidenceFlush(){if(recorder){std::string error;if(!recorder->flush(error))std::cerr<<"error: cannot preserve command evidence: "<<error<<"\n";}}
+    } flush{recorder.get()};
 
     bool useIncremental = !req.noIncremental;
     fs::path projectDir = fs::current_path();
     topo::build::IncrementalCache cache(projectDir);
 
     if (useIncremental && topo::build::NinjaGen::isAvailable()) {
-        auto result = topo::build::compileCppIncremental(compileCfg, cache.cacheDir());
+        auto result = topo::build::compileCppIncremental(compileCfg, cache.cacheDir(),recorder.get());
         if (result.exitCode != 0) return 1;
         irFiles = std::move(result.outputFiles);
     } else {
-        auto result = topo::build::compileCpp(compileCfg, useIncremental ? cache.irDir() : tempDir);
+        auto result = topo::build::compileCpp(compileCfg, useIncremental ? cache.irDir() : tempDir,recorder.get());
         if (result.exitCode != 0) return 1;
         irFiles = std::move(result.outputFiles);
     }
@@ -301,7 +364,7 @@ int main(int argc, char* argv[]) {
     // Ensure runtime auto-link (covers direct backend invocation without topo-build)
     topo::build::injectAutoLinkLibs(req.config, linkCfg.linkLibs, linkCfg.linkDirs);
 
-    auto linkResult = topo::build::linkCpp(linkCfg, optIRPath, tempDir, backendResult.jitExports);
+    auto linkResult = topo::build::linkCpp(linkCfg, optIRPath, tempDir, backendResult.jitExports,recorder.get());
 
     if (linkResult.exitCode != 0) {
         std::cerr << "error: linking failed (exit " << linkResult.exitCode << ")\n";
@@ -329,5 +392,8 @@ int main(int argc, char* argv[]) {
         }
     }
 
+    if(recorder && !recorder->flush(evidenceError)) {
+        std::cerr<<"error: cannot preserve requested command evidence: "<<evidenceError<<"\n";return 1;
+    }
     return 0;
 }
