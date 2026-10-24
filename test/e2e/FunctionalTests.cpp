@@ -21,7 +21,7 @@ using Functional = E2eFixture;
 // Feature correctness uses forced variants where defaults would benchmark
 // competing implementations. AutoSelection tests preserve the default path.
 
-// Forced adaptive/lifetime passes emit structured events before or between
+// Forced optimization passes emit structured events before or between
 // result lines. Validate those records and compare the unchanged application
 // output. Equivalence's forced cases separately require event emission.
 static std::string applicationOutput(const std::string& output,
@@ -663,7 +663,7 @@ TEST_F(Functional, Hints) {
     auto run = runBinary("hints", "hints_forced");
     ASSERT_EQ(run.exitCode, 0) << "Binary failed:\n" << run.output;
 
-    assertOutputMatches(run.output,
+    assertOutputMatches(applicationOutput(run.output, {"TopoParallelPass"}),
                         "26_hints: n=100 sum={{NUM}}\n"
                         "26_hints: all assertions passed\n"
                         "...");
