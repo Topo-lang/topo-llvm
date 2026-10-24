@@ -20,9 +20,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  # TOPO_CORE_REF / TOPO_LANG_CPP_REF (and the benchmark job's TOPO_CLI_REF /
-  # TOPO_LANG_RUST_REF) unpinned at promotion (2026-08-16): the
-  # [build.cpp].flags chain (BuildConfig::cppFlags) is on main now.
+  # Resolve these selected refs once; every platform checks out that exact SHA.
   TOPO_CORE_REF: main
   # topo-llvm core links topo::core::TopoBuildLib (lib/Build) which is
   # gated behind find_package(topo-lang) in topo-core. Install topo-lang
@@ -35,8 +33,44 @@ env:
   # the default scope. find_path(TOPO_LANG_CPP_RUNTIME_INCLUDE) in
   # topo-llvm/CMakeLists.txt picks them up from the install prefix.
   TOPO_LANG_CPP_REF: main
+  TOPO_LANG_RUST_REF: main
+  TOPO_CLI_REF: main
 
 jobs:
+  resolve-upstream:
+    name: Resolve upstream source identities
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    outputs:
+      core: ${{ steps.refs.outputs.core }}
+      lang: ${{ steps.refs.outputs.lang }}
+      cpp: ${{ steps.refs.outputs.cpp }}
+      rust: ${{ steps.refs.outputs.rust }}
+      cli: ${{ steps.refs.outputs.cli }}
+    steps:
+      - name: Resolve selected refs once for every platform
+        id: refs
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const selected = [
+              ['core', 'topo-core', process.env.TOPO_CORE_REF],
+              ['lang', 'topo-lang', process.env.TOPO_LANG_REF],
+              ['cpp', 'topo-lang-cpp', process.env.TOPO_LANG_CPP_REF],
+              ['rust', 'topo-lang-rust', process.env.TOPO_LANG_RUST_REF],
+              ['cli', 'topo-cli', process.env.TOPO_CLI_REF],
+            ];
+            const rows = [['Repository', 'Selected ref', 'Commit']];
+            for (const [output, repo, ref] of selected) {
+              const {data} = await github.rest.repos.getCommit({owner: 'Topo-lang', repo, ref});
+              if (!/^[0-9a-f]{40}$/.test(data.sha)) throw new Error(`Invalid commit identity for ${repo}`);
+              core.setOutput(output, data.sha);
+              core.info(`Topo-lang/${repo}: ${ref} -> ${data.sha}`);
+              rows.push([`Topo-lang/${repo}`, ref, data.sha]);
+            }
+            await core.summary.addHeading('Resolved upstream commits').addTable(rows).write();
+
   # ── Core scope build + test ────────
   # Builds the LLVM IR pass + Backend + Decompile + JitEngine + C-ABI
   # runtime libs (the topo-llvm core scope landed in the phase-4 lift).
@@ -45,6 +79,11 @@ jobs:
   # LLVM scope; not exercised here to keep CI scope manageable.
   build-and-test:
     name: build + test (${{ matrix.os }})
+    needs: resolve-upstream
+    env:
+      TOPO_CORE_SHA: ${{ needs.resolve-upstream.outputs.core }}
+      TOPO_LANG_SHA: ${{ needs.resolve-upstream.outputs.lang }}
+      TOPO_LANG_CPP_SHA: ${{ needs.resolve-upstream.outputs.cpp }}
     runs-on: ${{ matrix.os }}
     defaults:
       run:
@@ -133,23 +172,13 @@ jobs:
         uses: actions/cache@v5
         with:
           path: ${{ runner.temp }}/topo-install
-          # v5: upstream rebuilt with the bundled clang + static CRT on Windows
-          # (ABI + RuntimeLibrary fix); earlier GNU-ABI / dynamic-CRT installs
-          # must not be reused.
-          # v7: topo-core BuildConfig gained cppFlags + topo-lang-cpp's
-          # CppDriver consumes it; the backend tools' main.cpp references the
-          # new field, so a stale cached install header no longer compiles.
-          # v8: the dev-pinned upstream tips advanced (fix batch merged to
-          # core/cpp/cli dev); the key interpolates the refs, not their
-          # content — force the fresh clone.
-          key: topo-upstream-${{ env.TOPO_CORE_REF }}-${{ env.TOPO_LANG_REF }}-${{ env.TOPO_LANG_CPP_REF }}-${{ matrix.os }}-v8-crt
+          # Source identities and the bootstrap recipe both select the install.
+          key: topo-llvm-upstream-${{ matrix.os }}-${{ env.TOPO_CORE_SHA }}-${{ env.TOPO_LANG_SHA }}-${{ env.TOPO_LANG_CPP_SHA }}-${{ hashFiles('.github/workflows/ci.yml', '.github/scripts/checkout-upstream.sh', 'scripts/setup-llvm.sh', 'vcpkg.json') }}
 
       - name: Build & install topo-core (zero-LLVM, lang-less)
         if: steps.upstream-cache.outputs.cache-hit != 'true'
         run: |
-          git clone --depth 1 --branch "${TOPO_CORE_REF}" \
-              https://github.com/topo-lang/topo-core.git \
-              "${RUNNER_TEMP}/topo-core-src"
+          bash .github/scripts/checkout-upstream.sh topo-core "${TOPO_CORE_SHA}" "${RUNNER_TEMP}/topo-core-src"
           cmake -S "${RUNNER_TEMP}/topo-core-src" \
                 -B "${RUNNER_TEMP}/topo-core-build" \
                 -G Ninja -DCMAKE_BUILD_TYPE=Release \
@@ -161,9 +190,7 @@ jobs:
       - name: Build & install topo-lang
         if: steps.upstream-cache.outputs.cache-hit != 'true'
         run: |
-          git clone --depth 1 --branch "${TOPO_LANG_REF}" \
-              https://github.com/topo-lang/topo-lang.git \
-              "${RUNNER_TEMP}/topo-lang-src"
+          bash .github/scripts/checkout-upstream.sh topo-lang "${TOPO_LANG_SHA}" "${RUNNER_TEMP}/topo-lang-src"
           cmake -S "${RUNNER_TEMP}/topo-lang-src" \
                 -B "${RUNNER_TEMP}/topo-lang-build" \
                 -G Ninja -DCMAKE_BUILD_TYPE=Release \
@@ -193,9 +220,7 @@ jobs:
       - name: Build & install topo-lang-cpp (default scope)
         if: steps.upstream-cache.outputs.cache-hit != 'true'
         run: |
-          git clone --depth 1 --branch "${TOPO_LANG_CPP_REF}" \
-              https://github.com/topo-lang/topo-lang-cpp.git \
-              "${RUNNER_TEMP}/topo-lang-cpp-src"
+          bash .github/scripts/checkout-upstream.sh topo-lang-cpp "${TOPO_LANG_CPP_SHA}" "${RUNNER_TEMP}/topo-lang-cpp-src"
           cmake -S "${RUNNER_TEMP}/topo-lang-cpp-src" \
                 -B "${RUNNER_TEMP}/topo-lang-cpp-build" \
                 -G Ninja -DCMAKE_BUILD_TYPE=Release \
@@ -307,6 +332,7 @@ jobs:
   # artifact prebuilds are opt-in because they execute internal sampling.
   benchmark:
     name: functional + equivalence (${{ matrix.os }})
+    needs: resolve-upstream
     runs-on: ${{ matrix.os }}
     defaults:
       run:
@@ -325,10 +351,11 @@ jobs:
         # build-and-test job proves); first windows iterations are blind.
         os: [ubuntu-24.04, macos-14, windows-2022]
     env:
-      # Unpinned at promotion with the top-level TOPO_CORE_REF /
-      # TOPO_LANG_CPP_REF — see the comment on the workflow env block.
-      TOPO_LANG_RUST_REF: main
-      TOPO_CLI_REF: main
+      TOPO_CORE_SHA: ${{ needs.resolve-upstream.outputs.core }}
+      TOPO_LANG_SHA: ${{ needs.resolve-upstream.outputs.lang }}
+      TOPO_LANG_CPP_SHA: ${{ needs.resolve-upstream.outputs.cpp }}
+      TOPO_LANG_RUST_SHA: ${{ needs.resolve-upstream.outputs.rust }}
+      TOPO_CLI_SHA: ${{ needs.resolve-upstream.outputs.cli }}
       # Rust 1.98 emits LLVM 22 bitcode, matching this repo's LLVM 22 reader.
       # Upgrade both together after validating the backend on all platforms.
       RUSTUP_TOOLCHAIN: '1.98.0'
@@ -424,8 +451,7 @@ jobs:
 
       - name: Build & install topo-core (zero-LLVM, lang-less)
         run: |
-          git clone --depth 1 --branch "${TOPO_CORE_REF}" \
-              https://github.com/topo-lang/topo-core.git "${RUNNER_TEMP}/topo-core-src"
+          bash .github/scripts/checkout-upstream.sh topo-core "${TOPO_CORE_SHA}" "${RUNNER_TEMP}/topo-core-src"
           cmake -S "${RUNNER_TEMP}/topo-core-src" -B "${RUNNER_TEMP}/topo-core-build" \
                 -G Ninja -DCMAKE_BUILD_TYPE=Release \
                 -DCMAKE_INSTALL_PREFIX="${RUNNER_TEMP}/topo-install" \
@@ -435,8 +461,7 @@ jobs:
 
       - name: Build & install topo-lang
         run: |
-          git clone --depth 1 --branch "${TOPO_LANG_REF}" \
-              https://github.com/topo-lang/topo-lang.git "${RUNNER_TEMP}/topo-lang-src"
+          bash .github/scripts/checkout-upstream.sh topo-lang "${TOPO_LANG_SHA}" "${RUNNER_TEMP}/topo-lang-src"
           cmake -S "${RUNNER_TEMP}/topo-lang-src" -B "${RUNNER_TEMP}/topo-lang-build" \
                 -G Ninja -DCMAKE_BUILD_TYPE=Release \
                 -DCMAKE_INSTALL_PREFIX="${RUNNER_TEMP}/topo-install" \
@@ -457,8 +482,7 @@ jobs:
       # include. LLVM-independent, so this can precede the topo-llvm build.
       - name: Build & install topo-lang-cpp (default scope, headers)
         run: |
-          git clone --depth 1 --branch "${TOPO_LANG_CPP_REF}" \
-              https://github.com/topo-lang/topo-lang-cpp.git "${RUNNER_TEMP}/topo-lang-cpp-src"
+          bash .github/scripts/checkout-upstream.sh topo-lang-cpp "${TOPO_LANG_CPP_SHA}" "${RUNNER_TEMP}/topo-lang-cpp-src"
           cmake -S "${RUNNER_TEMP}/topo-lang-cpp-src" -B "${RUNNER_TEMP}/topo-lang-cpp-build" \
                 -G Ninja -DCMAKE_BUILD_TYPE=Release \
                 -DCMAKE_INSTALL_PREFIX="${RUNNER_TEMP}/topo-install" \
@@ -492,8 +516,7 @@ jobs:
 
       - name: Build & install topo-lang-rust (ENABLE_LLVM=ON)
         run: |
-          git clone --depth 1 --branch "${TOPO_LANG_RUST_REF}" \
-              https://github.com/topo-lang/topo-lang-rust.git "${RUNNER_TEMP}/topo-lang-rust-src"
+          bash .github/scripts/checkout-upstream.sh topo-lang-rust "${TOPO_LANG_RUST_SHA}" "${RUNNER_TEMP}/topo-lang-rust-src"
           cmake -S "${RUNNER_TEMP}/topo-lang-rust-src" -B "${RUNNER_TEMP}/topo-lang-rust-build" \
                 -G Ninja -DCMAKE_BUILD_TYPE=Release \
                 -DCMAKE_INSTALL_PREFIX="${RUNNER_TEMP}/topo-install" \
@@ -541,8 +564,7 @@ jobs:
       # find_package(topo-lang-*) picks them up.
       - name: Build & install topo-cli
         run: |
-          git clone --depth 1 --branch "${TOPO_CLI_REF}" \
-              https://github.com/topo-lang/topo-cli.git "${RUNNER_TEMP}/topo-cli-src"
+          bash .github/scripts/checkout-upstream.sh topo-cli "${TOPO_CLI_SHA}" "${RUNNER_TEMP}/topo-cli-src"
           cmake -S "${RUNNER_TEMP}/topo-cli-src" -B "${RUNNER_TEMP}/topo-cli-build" \
                 -G Ninja -DCMAKE_BUILD_TYPE=Release \
                 -DCMAKE_INSTALL_PREFIX="${RUNNER_TEMP}/topo-install" \
