@@ -55,7 +55,7 @@ std::string normalizeIRName(const llvm::Function& F) {
         bool isMachO = triple.find("apple") != std::string::npos ||
                        triple.find("darwin") != std::string::npos ||
                        triple.find("macho") != std::string::npos;
-        if (isMachO && !raw.empty() && raw[0] == '_') {
+        if (isMachO && !raw.empty() && raw[0] == '_' && raw.rfind("_Z", 0) != 0) {
             raw = raw.substr(1);
         }
     }
@@ -92,22 +92,25 @@ int ContainmentInterceptionPass::run(llvm::Module& module,
     for (const auto& [name, fn] : symbols.functions()) {
         if (!fn.isExternal) continue;
         auto it = mapping.matched.find(fn.qualifiedName);
-        if (it != mapping.matched.end() && it->second) externalFuncs.insert(it->second);
+        if (it == mapping.matched.end() || !it->second) continue;
+        // Whole-type exemption must agree with the physical IR owner even
+        // when the mapper offered a simple-name fallback for this entry.
+        if (!fn.externalOwner.empty() &&
+            !symbols.externalTypeForMember(normalizeIRName(*it->second))) continue;
+        externalFuncs.insert(it->second);
     }
     for (const auto& [qname, func] : mapping.matched) {
         if (func) funcQualName[func] = qname;
     }
 
-    // Build set of external function simple/qualified names for callee-side
-    // exemption: if a callee is itself declared external in .topo, the call is
-    // legitimate.  These names come from the SymbolTable (already demangled),
-    // and we compare them against normalizeIRName output.
-    std::unordered_set<std::string> declaredExternalNames;
-    for (const auto& [name, fn] : symbols.functions()) {
-        if (fn.isExternal) {
-            declaredExternalNames.insert(fn.simpleName);
-            declaredExternalNames.insert(fn.qualifiedName);
-        }
+    // Use exact declaration/owner identity. A simple-name match could exempt
+    // the real C fopen merely because another namespace declares fopen.
+    auto isExternalName = [&](const std::string& qualifiedName) {
+        if (const auto* fn = symbols.findFunction(qualifiedName); fn && fn->isExternal) return true;
+        return symbols.externalTypeForMember(qualifiedName) != nullptr;
+    };
+    for (auto& function : module) {
+        if (isExternalName(normalizeIRName(function))) externalFuncs.insert(&function);
     }
 
     // Lazy declaration of runtime violation function
@@ -152,10 +155,9 @@ int ContainmentInterceptionPass::run(llvm::Module& module,
                 auto cap = check::classifyApiCall(calleeName);
                 if (!cap) continue;
 
-                // If the callee is a declared external function, calling it is allowed.
-                // Comparison uses the normalized (demangled) name, which matches the
-                // SymbolTable's qualified/simple names.
-                if (declaredExternalNames.count(calleeName)) continue;
+                // Delegation preserves the exact physical function or complete
+                // demangled owner name. Unproved template ownership stays checked.
+                if (externalFuncs.count(callee) || isExternalName(calleeName)) continue;
 
                 // This is a violation: a non-external function calls an external API.
                 // Insert __topo_containment_violation(caller, callee) before the call.

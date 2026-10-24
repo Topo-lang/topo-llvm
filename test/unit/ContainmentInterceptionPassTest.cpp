@@ -37,7 +37,8 @@ struct ContainmentFixture {
     void build(llvm::LLVMContext& ctx,
                 const std::string& restrictedApiName = "fopen",
                 const std::string& callerQualName = "ns::worker",
-                bool callerIsExternal = false) {
+                bool callerIsExternal = false,
+                const std::string& callerOwningType = "") {
         module = std::make_unique<llvm::Module>("containment_demo", ctx);
         auto* voidTy = llvm::Type::getVoidTy(ctx);
         auto* ptrTy = llvm::PointerType::getUnqual(ctx);
@@ -64,6 +65,7 @@ struct ContainmentFixture {
         callerSym.qualifiedName = callerQualName;
         callerSym.simpleName = callerQualName.substr(callerQualName.rfind("::") + 2);
         callerSym.isExternal = callerIsExternal;
+        callerSym.owningType = callerOwningType;
         symbols.addFunction(callerSym);
 
         mapping.matched[callerQualName] = caller;
@@ -167,6 +169,71 @@ TEST_F(ContainmentInterceptionPassTest, ReportRecordsInterceptedCallSite) {
     ASSERT_EQ(report.entries.size(), 1u);
     EXPECT_EQ(report.entries[0].callerFunction, "ns::worker");
     EXPECT_EQ(report.entries[0].interceptedCallee, "socket");
+}
+
+
+TEST_F(ContainmentInterceptionPassTest, WholeExternalTypeOwnHelperStaysEffectful) {
+    llvm::LLVMContext ctx;
+    ContainmentFixture fx;
+    fx.build(ctx, "fopen", "ns::Log::hidden");
+    fx.caller->setName("_ZN2ns3Log6hiddenEv");
+    ClassSymbol cls; cls.qualifiedName = "ns::Log"; cls.simpleName = "Log"; cls.isExternal = true;
+    fx.symbols.addClassSymbol(cls);
+    EXPECT_EQ(ContainmentInterceptionPass::run(*fx.module, fx.symbols, fx.mapping), 0);
+    EXPECT_EQ(fx.violationCallCount(), 0);
+    EXPECT_FALSE(fx.caller->doesNotAccessMemory());
+    EXPECT_FALSE(fx.caller->hasFnAttribute(llvm::Attribute::Speculatable));
+}
+
+TEST_F(ContainmentInterceptionPassTest, WholeExternalTypeRecognizesDemangledPrivateHelper) {
+    llvm::LLVMContext ctx;
+    ContainmentFixture fx;
+    fx.build(ctx, "fopen", "ns::Log::hidden");
+    fx.caller->setName("_ZN2ns3Log6hiddenEv");
+    fx.module->setTargetTriple(llvm::Triple("arm64-apple-macosx15.0.0"));
+    fx.mapping.matched.clear();
+    ClassSymbol cls; cls.qualifiedName = "ns::Log"; cls.simpleName = "Log"; cls.isExternal = true;
+    fx.symbols.addClassSymbol(cls);
+    EXPECT_EQ(ContainmentInterceptionPass::run(*fx.module, fx.symbols, fx.mapping), 0);
+}
+
+TEST_F(ContainmentInterceptionPassTest, WholeExternalTypeDoesNotExemptSameNameOrDerivedOwner) {
+    for (const auto* owner : {"other::Log", "ns::Derived", "ns::LogExtra"}) {
+        llvm::LLVMContext ctx;
+        ContainmentFixture fx;
+        fx.build(ctx, "fopen", std::string(owner) + "::hidden");
+        ClassSymbol cls; cls.qualifiedName = "ns::Log"; cls.simpleName = "Log"; cls.isExternal = true;
+        fx.symbols.addClassSymbol(cls);
+        EXPECT_EQ(ContainmentInterceptionPass::run(*fx.module, fx.symbols, fx.mapping), 1) << owner;
+    }
+}
+
+TEST_F(ContainmentInterceptionPassTest, UnrelatedExternalSimpleNameCannotExemptGlobalApi) {
+    llvm::LLVMContext ctx;
+    ContainmentFixture fx;
+    fx.build(ctx, "fopen");
+    FunctionSymbol other; other.qualifiedName = "audit::fopen"; other.simpleName = "fopen"; other.isExternal = true;
+    fx.symbols.addFunction(other);
+    EXPECT_EQ(ContainmentInterceptionPass::run(*fx.module, fx.symbols, fx.mapping), 1);
+}
+
+
+TEST_F(ContainmentInterceptionPassTest, WholeTypeRequiresPhysicalOwnerDespiteMapperFallback) {
+    llvm::LLVMContext ctx;
+    ContainmentFixture fx;
+    fx.build(ctx, "fopen", "ns::Log::hidden", false, "ns::Log");
+    fx.caller->setName("_ZN5other3Log6hiddenEv");
+    ClassSymbol cls; cls.qualifiedName = "ns::Log"; cls.simpleName = "Log";
+    fx.symbols.addClassSymbol(cls);
+    ASSERT_TRUE(fx.symbols.markExternalType("ns::Log"));
+    const auto* member = fx.symbols.findFunction("ns::Log::hidden");
+    ASSERT_NE(member, nullptr);
+    ASSERT_TRUE(member->isExternal);
+    ASSERT_EQ(member->externalOwner, "ns::Log");
+    // The declaration is external, but its fallback mapping points to an
+    // unrelated physical owner; the call still requires interception.
+    EXPECT_EQ(ContainmentInterceptionPass::run(*fx.module, fx.symbols, fx.mapping), 1);
+    EXPECT_EQ(fx.violationCallCount(), 1);
 }
 
 } // namespace
